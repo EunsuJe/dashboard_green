@@ -1,0 +1,38 @@
+name: Sync Notion Dashboard
+
+on:
+  schedule:
+    - cron: "0 0-10 * * 1-5"   # UTC 기준. 평일 09~19시(KST) 매시 정각
+  workflow_dispatch:            # Actions 탭에서 수동 실행용
+
+permissions:
+  contents: write
+
+concurrency:
+  group: notion-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Fetch from Notion
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+        run: node scripts/fetch-notion.mjs
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data.json
+          git diff --staged --quiet && echo "변경 없음" && exit 0
+          git commit -m "chore: sync notion data"
+          git push
