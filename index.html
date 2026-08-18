@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>인원별 목표 대비 실적</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" rel="stylesheet">
+<style>
+  :root{
+    --bg:#ffffff;
+    --card:#ffffff;
+    --card-alt:#f7f7f5;
+    --border:#e8e8e6;
+    --text:#1a1a1a;
+    --muted:#8a8a85;
+    --blue:#3b82f6;
+    --track:#e3ecfb;
+    --green-bg:#ddf3e4;
+    --green-tx:#1d7a44;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:'Pretendard','Apple SD Gothic Neo','Malgun Gothic',-apple-system,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    padding:28px 20px 60px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1040px;margin:0 auto}
+
+  /* 상단 영역 */
+  .top{display:grid;grid-template-columns:1.9fr 1fr 1fr 1fr;gap:14px;margin-bottom:18px}
+  .hero{
+    background:var(--card-alt);border:1px solid var(--border);
+    border-radius:14px;padding:26px 28px;
+  }
+  .hero h1{font-size:29px;font-weight:800;letter-spacing:-.6px}
+  .hero p{margin-top:9px;font-size:14px;color:var(--muted);line-height:1.5}
+  .badge{
+    display:inline-block;margin-top:16px;padding:7px 14px;border-radius:8px;
+    background:var(--green-bg);color:var(--green-tx);font-size:13px;font-weight:700;
+  }
+  .kpi{
+    background:var(--card);border:1px solid var(--border);border-radius:14px;
+    padding:22px 20px;display:flex;flex-direction:column;justify-content:center;align-items:center;
+  }
+  .kpi .label{font-size:13px;color:var(--muted);font-weight:500}
+  .kpi .value{margin-top:14px;font-size:34px;font-weight:800;letter-spacing:-1px}
+  .kpi .unit{font-size:14px;font-weight:600;color:var(--muted);margin-left:3px}
+
+  /* 인원 카드 */
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .person{
+    background:var(--card);border:1px solid var(--border);
+    border-radius:14px;padding:22px 24px;
+  }
+  .person .row{display:flex;justify-content:space-between;align-items:baseline}
+  .person .name{font-size:17px;font-weight:700}
+  .person .score{font-size:15px;font-weight:600;color:var(--muted)}
+  .person .score b{font-size:20px;font-weight:800;color:var(--text);margin-right:2px}
+  .bar{margin-top:16px;height:9px;border-radius:99px;background:var(--track);overflow:hidden}
+  .bar span{display:block;height:100%;border-radius:99px;background:var(--blue);
+    width:0;transition:width .9s cubic-bezier(.22,1,.36,1)}
+  .foot{margin-top:11px;display:flex;justify-content:space-between;font-size:13px;color:var(--muted)}
+  .foot .pct{font-weight:600;color:#4a4a48}
+  .msg{grid-column:1/-1;color:var(--muted);font-size:14px;line-height:1.6}
+
+  @media (max-width:900px){
+    .top{grid-template-columns:1fr 1fr 1fr}
+    .hero{grid-column:1 / -1}
+  }
+  @media (max-width:620px){
+    .top{grid-template-columns:1fr}
+    .grid{grid-template-columns:1fr}
+    .hero h1{font-size:24px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="hero">
+      <h1>인원별 목표 대비 실적</h1>
+      <p>영업활동 DB의 담당자 연결 건수를 기준으로 업데이트했습니다.</p>
+      <div class="badge" id="updated">불러오는 중...</div>
+    </div>
+    <div class="kpi"><div class="label">총 목표</div>
+      <div class="value"><span id="totalGoal">0</span><span class="unit">Set</span></div></div>
+    <div class="kpi"><div class="label">총 실적</div>
+      <div class="value"><span id="totalDone">0</span><span class="unit">Set</span></div></div>
+    <div class="kpi"><div class="label">전체 달성률</div>
+      <div class="value"><span id="totalRate">0</span><span class="unit">%</span></div></div>
+  </div>
+
+  <div class="grid" id="grid"></div>
+</div>
+
+<script>
+const pct = (d, g) => g > 0 ? (d / g * 100) : 0;
+const fmt = n => Number(n || 0).toLocaleString("ko-KR");
+
+async function render() {
+  const res = await fetch("data.json?t=" + Date.now(), { cache: "no-store" });
+  if (!res.ok) throw new Error("data.json 응답 " + res.status);
+  const { updated, members } = await res.json();
+
+  document.getElementById("updated").textContent = "업데이트 기준: " + updated;
+
+  const totalGoal = members.reduce((s, m) => s + (m.goal || 0), 0);
+  const totalDone = members.reduce((s, m) => s + (m.done || 0), 0);
+  document.getElementById("totalGoal").textContent = fmt(totalGoal);
+  document.getElementById("totalDone").textContent = fmt(totalDone);
+  document.getElementById("totalRate").textContent = pct(totalDone, totalGoal).toFixed(2);
+
+  document.getElementById("grid").innerHTML = members.map(m => {
+    const p = pct(m.done, m.goal);
+    return `<div class="person">
+        <div class="row">
+          <div class="name">${m.name}</div>
+          <div class="score"><b>${fmt(m.done)}</b> / ${fmt(m.goal)} Set</div>
+        </div>
+        <div class="bar"><span data-w="${Math.min(p, 100)}"></span></div>
+        <div class="foot"><span>달성률</span><span class="pct">${p.toFixed(2)}%</span></div>
+      </div>`;
+  }).join("");
+
+  requestAnimationFrame(() => {
+    document.querySelectorAll(".bar span").forEach(el => {
+      const w = parseFloat(el.dataset.w);
+      el.style.width = (w > 0 ? Math.max(w, 1.5) : 0) + "%";
+    });
+  });
+}
+
+render().catch(err => {
+  document.getElementById("updated").textContent = "데이터 없음";
+  document.getElementById("grid").innerHTML =
+    `<div class="msg">데이터를 불러오지 못했습니다. (${err.message})<br>
+     Actions 탭에서 Sync 워크플로를 한 번 실행해 <b>data.json</b>이 생성되었는지 확인해 주세요.</div>`;
+});
+
+// 10분마다 자동 새로고침
+setInterval(() => render().catch(() => {}), 10 * 60 * 1000);
+</script>
+</body>
+</html>
