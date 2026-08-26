@@ -16,6 +16,7 @@
     --text:#1a1a1a;
     --muted:#8a8a85;
     --blue:#3b82f6;
+    --blue-light:#bfdbfe;
     --track:#e3ecfb;
     --green-bg:#ddf3e4;
     --green-tx:#1d7a44;
@@ -60,11 +61,18 @@
   .person .name{font-size:17px;font-weight:700}
   .person .score{font-size:15px;font-weight:600;color:var(--muted)}
   .person .score b{font-size:20px;font-weight:800;color:var(--text);margin-right:2px}
-  .bar{margin-top:16px;height:9px;border-radius:99px;background:var(--track);overflow:hidden}
-  .bar span{display:block;height:100%;border-radius:99px;background:var(--blue);
+  .bar{margin-top:16px;height:9px;border-radius:99px;background:var(--track);overflow:hidden;position:relative}
+  .bar span{display:block;height:100%;position:absolute;top:0;left:0;
     width:0;transition:width .9s cubic-bezier(.22,1,.36,1)}
+  .bar span.done{background:var(--blue);border-radius:99px;z-index:2}
+  .bar span.progress{background:var(--blue-light);border-radius:99px;z-index:1}
   .foot{margin-top:11px;display:flex;justify-content:space-between;font-size:13px;color:var(--muted)}
   .foot .pct{font-weight:600;color:#4a4a48}
+  .legend{display:flex;gap:16px;margin-top:8px;font-size:12px;color:var(--muted)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend i{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .legend i.done{background:var(--blue)}
+  .legend i.progress{background:var(--blue-light)}
   .msg{grid-column:1/-1;color:var(--muted);font-size:14px;line-height:1.6}
 
   @media (max-width:900px){
@@ -115,13 +123,22 @@ async function render() {
   document.getElementById("totalRate").textContent = pct(totalDone, totalGoal).toFixed(2);
 
   document.getElementById("grid").innerHTML = members.map(m => {
+    const inProgress = m.inProgress || 0;
     const p = pct(m.done, m.goal);
+    const pWithProgress = pct(m.done + inProgress, m.goal);
     return `<div class="person">
         <div class="row">
           <div class="name">${m.name}</div>
-          <div class="score"><b>${fmt(m.done)}</b> / ${fmt(m.goal)} Set</div>
+          <div class="score"><b>${fmt(m.done)}</b> / ${fmt(m.goal)} Set${inProgress ? ` <span style="color:var(--blue-light);font-weight:700">(+${fmt(inProgress)} 진행중)</span>` : ""}</div>
         </div>
-        <div class="bar"><span data-w="${Math.min(p, 100)}"></span></div>
+        <div class="bar">
+          <span class="progress" data-w="${Math.min(pWithProgress, 100)}"></span>
+          <span class="done" data-w="${Math.min(p, 100)}"></span>
+        </div>
+        <div class="legend">
+          <span><i class="done"></i>실적 ${fmt(m.done)}</span>
+          <span><i class="progress"></i>진행중 ${fmt(inProgress)}</span>
+        </div>
         <div class="foot"><span>달성률</span><span class="pct">${p.toFixed(2)}%</span></div>
       </div>`;
   }).join("");
