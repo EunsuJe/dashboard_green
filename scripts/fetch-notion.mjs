@@ -50,10 +50,11 @@ do {
 } while (cursor);
 
 const members = rows.map(r => ({
-  name:  title(r.properties),
-  goal:  num(pick(r.properties, "목표")),
-  done:  num(pick(r.properties, "실적")),
-  order: num(pick(r.properties, "순서"))
+  name:       title(r.properties),
+  goal:       num(pick(r.properties, "목표")),
+  done:       num(pick(r.properties, "실적")),
+  inProgress: num(pick(r.properties, "진행중")),
+  order:      num(pick(r.properties, "순서"))
 }))
   .filter(m => m.name)
   .sort((a, b) => (a.order || 999) - (b.order || 999));
