@@ -166,4 +166,33 @@ if (zero === members.length && members.length > 0) {
   console.warn("→ 위 목록에서 '실적'/'진행중' 관련 컬럼의 type과 실제 값을 확인하세요.");
   console.warn("  - rollup인데 값이 null/빈 배열이면: 롤업이 참조하는 원본 관계형 DB가 이 integration에 연결(Share)되지 않았을 가능성이 높습니다.");
   console.warn("  - formula/rollup 결과 타입이 date/string 등 숫자가 아니면 집계 로직 보완이 필요합니다.");
+
+  // relation 속성이 빈 배열이면, 그 relation이 가리키는 대상 DB에
+  // integration이 실제로 접근 가능한지 자동으로 검사해서 원인을 확정한다.
+  try {
+    const schema = await get(`databases/${DB_ID}`);
+    const relationProps = Object.entries(schema.properties)
+      .filter(([, v]) => v.type === "relation");
+
+    if (relationProps.length === 0) {
+      console.warn("→ 이 DB에는 relation(관계) 속성이 없습니다. rollup이 참조하는 속성 구성을 다시 확인하세요.");
+    }
+
+    for (const [propName, propDef] of relationProps) {
+      const relatedDbId = propDef.relation?.database_id;
+      const emptyInRow0 = rows[0]?.properties?.[propName]?.relation?.length === 0;
+      console.warn(`→ relation "${propName}" → 대상 DB: ${relatedDbId} (첫 행 값 비어있음: ${emptyInRow0})`);
+      if (!relatedDbId) continue;
+      try {
+        await get(`databases/${relatedDbId}`);
+        console.warn(`  ✓ integration이 대상 DB(${relatedDbId})에 접근 가능합니다. (원인이 공유 문제가 아닐 수 있음)`);
+      } catch (e) {
+        console.warn(`  ✗ integration이 대상 DB(${relatedDbId})에 접근할 수 없습니다: ${e.message}`);
+        console.warn(`    → Notion에서 해당 DB(예: 영업활동DB)를 열어 우측 상단 '...' → 연결(Connections)에서`);
+        console.warn(`      이 integration을 추가/공유해야 relation·rollup 값이 채워집니다.`);
+      }
+    }
+  } catch (e) {
+    console.warn(`DB 스키마 조회 실패, relation 대상 진단을 건너뜁니다: ${e.message}`);
+  }
 }
