@@ -1,38 +1,38 @@
 const T = process.env.NOTION_TOKEN;
 const H = { Authorization: `Bearer ${T}`, "Notion-Version": "2025-09-03", "Content-Type": "application/json" };
 const DS = "3b11fd97-2c80-8056-82f1-000b39c28f42";
+const g = async (p) => (await fetch(`https://api.notion.com/v1/${p}`, { headers: H })).json();
 
-// 1) 데이터 소스 스키마에서 관계 컬럼의 대상 DB를 찾는다
-const schema = await (await fetch(`https://api.notion.com/v1/data_sources/${DS}`, { headers: H })).json();
-console.log("현재 DB:", schema.title?.[0]?.plain_text ?? "(제목 없음)");
-
-const relations = Object.entries(schema.properties ?? {}).filter(([, v]) => v.type === "relation");
-if (!relations.length) console.log("관계 컬럼이 없습니다.");
-
-for (const [name, prop] of relations) {
-  const targetDb = prop.relation?.database_id;
-  const targetDs = prop.relation?.data_source_id;
-  console.log(`\n[관계 컬럼] ${name}`);
-  console.log(`  대상 database_id: ${targetDb}`);
-
-  const res = await fetch(`https://api.notion.com/v1/databases/${targetDb}`, { headers: H });
-  const body = await res.json();
-  if (res.ok) {
-    console.log(`  ✅ 접근 가능 (HTTP 200) — 이름: "${body.title?.[0]?.plain_text ?? "?"}"`);
-  } else {
-    console.log(`  ❌ 접근 불가 (HTTP ${res.status}) — ${body.message ?? ""}`);
-    console.log(`  → 이 데이터베이스에 통합을 초대해야 합니다.`);
+// 1) 롤업이 무엇을 참조하는지 (설정 자체를 확인)
+const schema = await g(`data_sources/${DS}`);
+console.log("=== 목표 대비 실적 : 롤업/수식 설정 ===");
+for (const [name, p] of Object.entries(schema.properties)) {
+  if (p.type === "rollup") {
+    const r = p.rollup;
+    console.log(`[${name}] 롤업 → 관계"${r.relation_property_name}" 의 "${r.rollup_property_name}" 를 ${r.function}`);
   }
-  if (targetDs) {
-    const r2 = await fetch(`https://api.notion.com/v1/data_sources/${targetDs}`, { headers: H });
-    console.log(`  data_source 접근: HTTP ${r2.status}`);
-  }
+  if (p.type === "formula") console.log(`[${name}] 수식 → ${p.formula.expression}`);
+  if (p.type === "relation") console.log(`[${name}] 관계 → ${p.relation.data_source_id}`);
 }
 
-// 2) 통합이 현재 볼 수 있는 DB 목록 (초대된 곳이 어디인지 확인용)
-const s = await (await fetch("https://api.notion.com/v1/search", {
-  method: "POST", headers: H,
-  body: JSON.stringify({ filter: { value: "data_source", property: "object" }, page_size: 50 })
-})).json();
-console.log(`\n[통합이 접근 가능한 데이터 소스 ${s.results?.length ?? 0}개]`);
-for (const r of s.results ?? []) console.log(`  - ${r.title?.[0]?.plain_text ?? "(제목 없음)"}  ${r.id}`);
+// 2) 직원 DB에서 그 대상 속성이 또 롤업/수식인지 (= 중첩 여부)
+const empDs = schema.properties["직원"]?.relation?.data_source_id;
+const emp = await g(`data_sources/${empDs}`);
+console.log(`\n=== 직원 DB 속성 타입 ===`);
+for (const [name, p] of Object.entries(emp.properties)) console.log(`  ${name} → ${p.type}`);
+
+// 3) 전 행의 관계 연결 수와 롤업 원본값
+const q = await (await fetch(`https://api.notion.com/v1/data_sources/${DS}/query`,
+  { method: "POST", headers: H, body: JSON.stringify({ page_size: 100 }) })).json();
+console.log(`\n=== 행별 실측 (${q.results.length}행) ===`);
+for (const row of q.results) {
+  const t = Object.values(row.properties).find(p => p.type === "title");
+  const name = t?.title.map(x => x.plain_text).join("") || "(무제)";
+  const rels = Object.entries(row.properties)
+    .filter(([, v]) => v.type === "relation")
+    .map(([k, v]) => `${k}=${v.relation.length}`).join(" ");
+  const rolls = Object.entries(row.properties)
+    .filter(([, v]) => v.type === "rollup")
+    .map(([k, v]) => `${k}:${JSON.stringify(v.rollup)}`).join(" ");
+  console.log(`${name} | 관계 ${rels} | ${rolls}`);
+}
