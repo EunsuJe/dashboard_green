@@ -171,11 +171,19 @@ if (zero === members.length && members.length > 0) {
   // integration이 실제로 접근 가능한지 자동으로 검사해서 원인을 확정한다.
   try {
     const schema = await get(`databases/${DB_ID}`);
-    const relationProps = Object.entries(schema.properties)
+    console.warn(`→ [진단] GET /databases/${DB_ID} 응답: object=${schema.object}, data_sources=${JSON.stringify(schema.data_sources ?? "없음")}`);
+    console.warn(`→ [진단] schema.properties 키 목록: ${schema.properties ? Object.keys(schema.properties).join(", ") : "properties 필드 자체가 없음"}`);
+    if (schema.properties) {
+      for (const [k, v] of Object.entries(schema.properties)) {
+        console.warn(`   ${k} → ${v.type}`);
+      }
+    }
+
+    const relationProps = Object.entries(schema.properties ?? {})
       .filter(([, v]) => v.type === "relation");
 
     if (relationProps.length === 0) {
-      console.warn("→ 이 DB에는 relation(관계) 속성이 없습니다. rollup이 참조하는 속성 구성을 다시 확인하세요.");
+      console.warn("→ 이 DB 스키마 응답에는 relation(관계) 속성이 없습니다. (위 [진단] 로그로 실제 원인 확인 필요 — 예: 다중 데이터소스 DB로 전환되어 2022-06-28 버전에서 properties가 예전과 다르게 내려올 수 있음)");
     }
 
     for (const [propName, propDef] of relationProps) {
