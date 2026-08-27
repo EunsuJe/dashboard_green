@@ -1,57 +1,30 @@
 import { writeFile } from "node:fs/promises";
 
-const DEFAULT_URL =
-  "https://app.notion.com/p/3b11fd972c80807589b1dfe336b24d10?v=3b11fd972c8080938176000cd8c76dac";
+const TOKEN   = process.env.NOTION_TOKEN;
+const ROOT_DS = process.env.NOTION_DATA_SOURCE_ID || "3b11fd97-2c80-8056-82f1-000b39c28f42";
+const VERSION = "2025-09-03";
+const MAX_DEPTH = 6;
 
-const TOKEN    = process.env.NOTION_TOKEN;
-const RAW_REF  = process.env.NOTION_DB_ID || process.env.NOTION_URL || DEFAULT_URL;
-const DS_ENV   = process.env.NOTION_DATA_SOURCE_ID || "";
-const REL_PROP = process.env.RELATION_PROP || "직원";
-const DIAGNOSE = process.env.DIAGNOSE === "1";
-const VERSION  = process.env.NOTION_VERSION || "2025-09-03";
-
-if (!TOKEN) {
-  console.error("NOTION_TOKEN 시크릿이 설정되지 않았습니다.");
-  process.exit(1);
-}
+if (!TOKEN) { console.error("NOTION_TOKEN 이 없습니다."); process.exit(1); }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-const toId = (ref) => {
-  const m = String(ref).match(/[0-9a-f]{32}|[0-9a-f-]{36}/i);
-  if (!m) throw new Error(`ID 추출 실패: ${ref}`);
-  const h = m[0].replace(/-/g, "").toLowerCase();
-  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
-};
-
-// ── HTTP (429/5xx 자동 재시도) ─────────────────────────────────────────────
-const request = async (path, { version = VERSION, ...opt } = {}, attempt = 0) => {
+const api = async (path, opt = {}, attempt = 0) => {
   const res = await fetch(`https://api.notion.com/v1/${path}`, {
     ...opt,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      "Notion-Version": version,
-      "Content-Type": "application/json"
-    }
+    headers: { Authorization: `Bearer ${TOKEN}`, "Notion-Version": VERSION, "Content-Type": "application/json" }
   });
   if (res.status === 429 || res.status >= 500) {
-    if (attempt >= 4) {
-      throw Object.assign(new Error(`${res.status} ${await res.text()}`), { status: res.status });
-    }
-    const wait = Number(res.headers.get("retry-after") || 0) * 1000 || 500 * 2 ** attempt;
-    await sleep(wait);
-    return request(path, { version, ...opt }, attempt + 1);
+    if (attempt >= 4) throw new Error(`${res.status} ${await res.text()}`);
+    await sleep(Number(res.headers.get("retry-after") || 0) * 1000 || 500 * 2 ** attempt);
+    return api(path, opt, attempt + 1);
   }
-  if (!res.ok) {
-    throw Object.assign(new Error(`${res.status} ${await res.text()}`), { status: res.status });
-  }
+  if (!res.ok) throw Object.assign(new Error(`${res.status} ${await res.text()}`), { status: res.status });
   return res.json();
 };
+const get  = (p) => api(p);
+const post = (p, b) => api(p, { method: "POST", body: JSON.stringify(b) });
 
-const post = (p, b, v) => request(p, { method: "POST", body: JSON.stringify(b), version: v });
-const get  = (p, v) => request(p, { method: "GET", version: v });
-
-// 동시 요청 제한 (Notion 권장 ~3 rps)
 const mapLimit = async (items, limit, fn) => {
   const out = new Array(items.length);
   let i = 0;
@@ -61,266 +34,242 @@ const mapLimit = async (items, limit, fn) => {
   return out;
 };
 
-// ── 값 파싱: {ok, value} 로 "못 읽음"과 "진짜 0"을 반드시 구분 ──────────────
-const FAIL = (reason) => ({ ok: false, value: 0, reason });
-const OK   = (value)  => ({ ok: true, value });
+// ── 캐시: 데이터 소스 스키마 / 페이지 ────────────────────────────────────────
+const schemaCache = new Map();   // dsId → properties
+const pageCache   = new Map();   // pageId → page
+const prefetched  = new Set();   // 통째로 읽어둔 dsId
 
-const parseNum = (v) => {
-  const n = parseFloat(String(v ?? "").replace(/[^\d.-]/g, ""));
-  return Number.isFinite(n) ? n : null;
-};
-const plain = (arr) => (Array.isArray(arr) ? arr.map(t => t.plain_text).join("") : arr?.plain_text ?? "");
-
-const readShallow = (p) => {
-  if (!p) return FAIL("속성 없음");
-  switch (p.type) {
-    case "number":   return p.number == null ? FAIL("number=null") : OK(p.number);
-    case "checkbox": return OK(p.checkbox ? 1 : 0);
-    case "rich_text":
-    case "title": {
-      const n = parseNum(plain(p[p.type]));
-      return n == null ? FAIL("숫자 아님") : OK(n);
-    }
-    case "select": {
-      const n = parseNum(p.select?.name);
-      return n == null ? FAIL("숫자 아님") : OK(n);
-    }
-    case "relation":
-      return Array.isArray(p.relation) ? OK(p.relation.length) : (p.relation ? OK(1) : OK(0));
-    case "formula": {
-      const f = p.formula ?? {};
-      if (f.type === "number")      return f.number == null ? FAIL("formula number=null") : OK(f.number);
-      if (f.type === "boolean")     return OK(f.boolean ? 1 : 0);
-      if (f.type === "string")      { const n = parseNum(f.string); return n == null ? FAIL("formula 문자열") : OK(n); }
-      if (f.type === "unsupported") return FAIL("formula unsupported (롤업 중첩 → API 계산 불가)");
-      return FAIL(`formula ${f.type}`);
-    }
-    case "rollup": {
-      const r = p.rollup ?? {};
-      if (r.type === "number")      return r.number == null ? FAIL("rollup number=null") : OK(r.number);
-      if (r.type === "unsupported") return FAIL("rollup unsupported");
-      if (r.type === "incomplete")  return FAIL("rollup incomplete");
-      if (r.type === "array") {
-        // 배열이 비었거나 전부 해석 실패면 절대 OK(0)을 돌려주지 않는다.
-        if (!r.array.length) return FAIL("rollup array 비어 있음(관계 대상 DB 공유 여부 확인)");
-        if (r.array.length >= 25) return FAIL("rollup array 25개 절단");
-        let sum = 0, hit = 0;
-        for (const it of r.array) {
-          const v = readShallow(it);
-          if (!v.ok) continue;
-          if (it.type === "number" && it.number == null) continue;
-          sum += v.value; hit++;
-        }
-        if (!hit) return FAIL(`rollup array 해석 실패: ${JSON.stringify(r.array.slice(0, 2))}`);
-        return OK(sum);
-      }
-      return FAIL(`rollup ${r.type}`);
-    }
-    default: return FAIL(`미지원 타입 ${p.type}`);
+const schemaOf = async (dsId) => {
+  if (!schemaCache.has(dsId)) {
+    const ds = await get(`data_sources/${dsId}`);
+    schemaCache.set(dsId, ds.properties ?? {});
   }
+  return schemaCache.get(dsId);
 };
 
-// 속성 전용 엔드포인트 재조회. 롤업 합계는 results 가 아니라 property_item.rollup 에 있다.
-const readDeep = async (pageId, p) => {
-  const first = readShallow(p);
-  if (first.ok) return first;
-  if (!p || !["formula", "rollup", "relation"].includes(p.type)) return first;
+const queryAll = async (dsId) => {
+  const rows = []; let cursor;
+  do {
+    const d = await post(`data_sources/${dsId}/query`,
+      { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) });
+    rows.push(...d.results);
+    cursor = d.has_more ? d.next_cursor : null;
+  } while (cursor);
+  return rows;
+};
 
+const prefetchDs = async (dsId) => {
+  if (prefetched.has(dsId)) return;
+  prefetched.add(dsId);
   try {
-    let cursor, lastRollup = null, listSum = 0, hits = 0, sawList = false;
-    do {
-      const qs = cursor ? `?page_size=100&start_cursor=${cursor}` : "?page_size=100";
-      const data = await get(`pages/${pageId}/properties/${encodeURIComponent(p.id)}${qs}`);
-      if (data.object !== "list") return readShallow(data);   // 단일 값 응답(수식 등)
-      sawList = true;
-      for (const it of data.results) {
-        const v = readShallow(it);
-        if (v.ok && !(it.type === "number" && it.number == null)) { listSum += v.value; hits++; }
-      }
-      if (data.property_item?.type === "rollup") lastRollup = data.property_item.rollup;
-      cursor = data.has_more ? data.next_cursor : null;
-    } while (cursor);
-
-    if (lastRollup?.type === "number" && lastRollup.number != null) return OK(lastRollup.number);
-    if (lastRollup?.type === "unsupported") return FAIL("rollup unsupported (재조회 후에도)");
-    return (sawList && hits) ? OK(listSum) : FAIL(`재조회로도 해석 불가 (${p.type})`);
-  } catch (e) {
-    return FAIL(`재조회 실패: ${e.message}`);
-  }
+    for (const pg of await queryAll(dsId)) pageCache.set(pg.id, pg);
+  } catch (e) { console.warn(`데이터소스 프리페치 실패 ${dsId}: ${e.message}`); }
 };
 
+const pageOf = async (pageId, dsHint) => {
+  if (pageCache.has(pageId)) return pageCache.get(pageId);
+  if (dsHint) { await prefetchDs(dsHint); if (pageCache.has(pageId)) return pageCache.get(pageId); }
+  try {
+    const pg = await get(`pages/${pageId}`);
+    pageCache.set(pageId, pg);
+    return pg;
+  } catch { return null; }
+};
+
+// ── 유틸 ───────────────────────────────────────────────────────────────────
+const plain = (a) => (Array.isArray(a) ? a.map(t => t.plain_text).join("") : a?.plain_text ?? "");
 const titleOf = (props) => {
   const t = Object.values(props).find(p => p.type === "title");
   return t ? plain(t.title).trim() : "";
 };
+const normalize = (s) => String(s).replace(/[\s()（）]/g, "").toLowerCase();
+const findKey = (obj, name) =>
+  Object.keys(obj).find(k => k === name) ??
+  Object.keys(obj).find(k => normalize(k) === normalize(name)) ??
+  Object.keys(obj).find(k => normalize(k).includes(normalize(name)));
 
-const normalize = (s) => s.replace(/[\s()（）]/g, "").toLowerCase();
+const dsIdOfPage = (page) => page?.parent?.data_source_id ?? null;
 
-// 키워드에 걸리는 후보를 전부 모아 타입 선호 순으로 (number → rollup → formula)
-const RANK = { number: 0, rollup: 1, formula: 2, rich_text: 3, select: 4, checkbox: 5, relation: 6 };
-const candidates = (props, keys) =>
-  Object.entries(props)
-    .filter(([k]) => keys.some(w => normalize(k).includes(normalize(w))))
-    .map(([k, v]) => ({ key: k, prop: v }))
-    .sort((a, b) => (RANK[a.prop.type] ?? 9) - (RANK[b.prop.type] ?? 9));
-
-const GROUPS = {
-  goal:       { keys: ["목표"],                    label: "목표" },
-  done:       { keys: ["실적", "실"],              label: "실적" },
-  inProgress: { keys: ["진행중", "진행 중", "진"], label: "진행중" },
-  order:      { keys: ["순서"],                    label: "순서" }
-};
-
-// ── 데이터 소스 해석 ────────────────────────────────────────────────────────
-const resolveSource = async (ref) => {
-  const id = toId(ref);
-  if (DS_ENV) return { mode: "data_source", id: toId(DS_ENV) };
-
-  try {
-    const db = await get(`databases/${id}`);
-    const list = db.data_sources ?? [];
-    if (list.length > 1) {
-      console.warn(`데이터 소스 ${list.length}개 → 첫 번째 사용. 변경하려면 NOTION_DATA_SOURCE_ID 지정:`);
-      list.forEach(d => console.warn(`  - ${d.name}: ${d.id}`));
-    }
-    if (list.length) return { mode: "data_source", id: list[0].id };
-    return { mode: "database", id };
-  } catch (e) {
-    if (e.status !== 404 && e.status !== 400) throw e;
-  }
-
-  try {
-    let cursor;
-    do {
-      const qs = cursor ? `?page_size=100&start_cursor=${cursor}` : "?page_size=100";
-      const kids = await get(`blocks/${id}/children${qs}`);
-      const child = kids.results.find(b => b.type === "child_database");
-      if (child) return resolveSource(child.id);
-      cursor = kids.has_more ? kids.next_cursor : null;
-    } while (cursor);
-  } catch { /* fallthrough */ }
-
-  throw new Error(`대상을 찾을 수 없습니다(${id}). DB의 ••• > 연결 에서 통합을 초대했는지 확인하세요.`);
-};
-
-const src = await resolveSource(RAW_REF);
-
-const queryAll = async () => {
-  const tries = src.mode === "data_source"
-    ? [{ p: `data_sources/${src.id}/query`, v: VERSION },
-       { p: `databases/${toId(RAW_REF)}/query`, v: "2022-06-28" }]
-    : [{ p: `databases/${src.id}/query`, v: "2022-06-28" }];
-
-  for (const [i, t] of tries.entries()) {
-    try {
-      const rows = []; let cursor;
-      do {
-        const d = await post(t.p, { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) }, t.v);
-        rows.push(...d.results);
-        cursor = d.has_more ? d.next_cursor : null;
-      } while (cursor);
-      if (i > 0) console.warn(`구버전 엔드포인트로 폴백했습니다.`);
-      return rows;
-    } catch (e) {
-      if (i === tries.length - 1) throw e;
-      console.warn(`${t.p} 실패(${e.message}) → 폴백 시도`);
-    }
-  }
-};
-
-const rows = (await queryAll()).filter(r => titleOf(r.properties));
-console.log(`${rows.length}행 수집 (${src.mode} ${src.id})`);
-
-// ── 관계를 직접 펼쳐 합산하는 최후 폴백 ─────────────────────────────────────
-const findRelation = (props) => {
-  const entries = Object.entries(props).filter(([, v]) => v.type === "relation");
-  const named = entries.find(([k]) => normalize(k).includes(normalize(REL_PROP)));
-  return (named ?? entries[0])?.[1] ?? null;
-};
-
-const relationIds = async (pageId, props) => {
-  const target = findRelation(props);
-  if (!target) return [];
-  if (Array.isArray(target.relation) && target.relation.length < 25) {
-    return target.relation.map(r => r.id);
-  }
+// 관계 대상 ID 목록 (25개 초과 시 속성 엔드포인트로 페이지네이션)
+const relationIds = async (page, prop) => {
+  if (Array.isArray(prop.relation) && prop.relation.length < 25) return prop.relation.map(r => r.id);
   const ids = []; let cursor;
   do {
     const qs = cursor ? `?page_size=100&start_cursor=${cursor}` : "?page_size=100";
-    const d = await get(`pages/${pageId}/properties/${encodeURIComponent(target.id)}${qs}`);
+    const d = await get(`pages/${page.id}/properties/${encodeURIComponent(prop.id)}${qs}`);
     for (const it of d.results ?? []) if (it.type === "relation") ids.push(it.relation.id);
     cursor = d.has_more ? d.next_cursor : null;
   } while (cursor);
   return ids;
 };
 
-const relCache = new Map();
-const fetchRelated = (id) => {
-  if (!relCache.has(id)) relCache.set(id, get(`pages/${id}`).catch(() => null));
-  return relCache.get(id);
+// ── 수식 평가기: prop("x"), 숫자, + - * / ( ), 소수 함수 ─────────────────────
+const FUNCS = {
+  round: (x) => Math.round(x), abs: Math.abs, floor: Math.floor, ceil: Math.ceil,
+  min: (...a) => Math.min(...a), max: (...a) => Math.max(...a),
+  tonumber: (x) => Number(x) || 0, unaryminus: (x) => -x
 };
 
-const viaRelation = async (pageId, props, keys) => {
-  const ids = await relationIds(pageId, props);
-  if (!ids.length) return FAIL("관계 비어 있음");
-  const pages = (await mapLimit(ids, 3, fetchRelated)).filter(Boolean);
-  let sum = 0, matched = false;
-  for (const pg of pages) {
-    for (const c of candidates(pg.properties ?? {}, keys)) {
-      const v = readShallow(c.prop);
-      if (v.ok) { sum += v.value; matched = true; break; }
+const evalFormula = async (expr, resolveProp) => {
+  // 토큰화
+  const tokens = [];
+  const re = /\s*(prop\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)|[A-Za-z_]\w*|\d+(?:\.\d+)?|[()+\-*/,])/y;
+  let pos = 0;
+  while (pos < expr.length) {
+    re.lastIndex = pos;
+    const m = re.exec(expr);
+    if (!m) throw new Error(`파싱 불가: ${expr.slice(pos, pos + 20)}`);
+    pos = re.lastIndex;
+    if (m[2] !== undefined) tokens.push({ t: "prop", v: m[2].replace(/\\"/g, '"') });
+    else if (/^\d/.test(m[1])) tokens.push({ t: "num", v: parseFloat(m[1]) });
+    else if (/^[A-Za-z_]/.test(m[1])) tokens.push({ t: "id", v: m[1].toLowerCase() });
+    else tokens.push({ t: m[1] });
+  }
+
+  let i = 0;
+  const peek = () => tokens[i];
+  const eat = (t) => { if (tokens[i]?.t !== t) throw new Error(`'${t}' 기대`); return tokens[i++]; };
+
+  const parseExpr = async () => {
+    let v = await parseTerm();
+    while (peek()?.t === "+" || peek()?.t === "-") {
+      const op = tokens[i++].t, r = await parseTerm();
+      v = op === "+" ? v + r : v - r;
     }
-  }
-  return matched ? OK(sum) : OK(pages.length);  // 값 컬럼이 없으면 개수 집계로 간주
-};
-
-// ── 그룹별 값 결정 ─────────────────────────────────────────────────────────
-const resolveGroup = async (row, groupKey) => {
-  const { keys, label } = GROUPS[groupKey];
-  const cands = candidates(row.properties, keys);
-  const reasons = [];
-  let firstOk = null;
-
-  for (const c of cands) {
-    const v = await readDeep(row.id, c.prop);
-    if (!v.ok) { reasons.push(`${c.key}(${c.prop.type}): ${v.reason}`); continue; }
-    if (v.value !== 0) return { value: v.value, from: c.key };   // 0 아닌 값 우선 채택
-    if (!firstOk) firstOk = { value: 0, from: c.key };
-    reasons.push(`${c.key}(${c.prop.type}): 0 반환`);
-  }
-
-  if (groupKey === "done" || groupKey === "inProgress") {
-    const v = await viaRelation(row.id, row.properties, keys);
-    if (v.ok && v.value !== 0) {
-      return { value: v.value, from: `${REL_PROP} 관계 직접 합산`, fallback: true, reasons };
+    return v;
+  };
+  const parseTerm = async () => {
+    let v = await parseUnary();
+    while (peek()?.t === "*" || peek()?.t === "/") {
+      const op = tokens[i++].t, r = await parseUnary();
+      v = op === "*" ? v * r : (r === 0 ? 0 : v / r);
     }
-  }
+    return v;
+  };
+  const parseUnary = async () => {
+    if (peek()?.t === "-") { i++; return -(await parseUnary()); }
+    return parseAtom();
+  };
+  const parseAtom = async () => {
+    const tk = peek();
+    if (!tk) throw new Error("수식이 갑자기 끝남");
+    if (tk.t === "num")  { i++; return tk.v; }
+    if (tk.t === "prop") { i++; return await resolveProp(tk.v); }
+    if (tk.t === "(")    { i++; const v = await parseExpr(); eat(")"); return v; }
+    if (tk.t === "id") {
+      i++;
+      const fn = FUNCS[tk.v];
+      if (peek()?.t !== "(") throw new Error(`알 수 없는 식별자 ${tk.v}`);
+      i++;
+      const args = [];
+      if (peek()?.t !== ")") {
+        args.push(await parseExpr());
+        while (peek()?.t === ",") { i++; args.push(await parseExpr()); }
+      }
+      eat(")");
+      if (!fn) throw new Error(`미지원 함수 ${tk.v}`);
+      return fn(...args);
+    }
+    throw new Error(`예상치 못한 토큰 ${tk.t}`);
+  };
 
-  if (firstOk) return { ...firstOk, reasons };
-  return { value: 0, from: null, reasons: reasons.length ? reasons : [`'${label}' 속성 없음`] };
+  const out = await parseExpr();
+  if (i !== tokens.length) throw new Error("수식 잔여 토큰");
+  return Number.isFinite(out) ? out : 0;
 };
 
-const problems = [];
-const members = (await mapLimit(rows, 3, async (r) => {
+// ── 핵심: 속성 값을 재귀적으로 직접 계산 ────────────────────────────────────
+const aggregate = (fn, values) => {
+  const nums = values.filter(v => Number.isFinite(v));
+  switch (fn) {
+    case "sum": return nums.reduce((s, v) => s + v, 0);
+    case "average": return nums.length ? nums.reduce((s, v) => s + v, 0) / nums.length : 0;
+    case "min": return nums.length ? Math.min(...nums) : 0;
+    case "max": return nums.length ? Math.max(...nums) : 0;
+    case "count": case "count_values": return values.length;
+    case "empty": return values.filter(v => !v).length;
+    case "not_empty": return values.filter(v => !!v).length;
+    default: return nums.reduce((s, v) => s + v, 0);
+  }
+};
+
+const resolveValue = async (page, propName, depth = 0, trail = []) => {
+  if (!page || depth > MAX_DEPTH) return 0;
+  const props = page.properties ?? {};
+  const key = findKey(props, propName);
+  if (!key) return 0;
+  const p = props[key];
+  const dsId = dsIdOfPage(page);
+  const schema = dsId ? await schemaOf(dsId).catch(() => ({})) : {};
+  const def = schema[key] ?? p;
+
+  switch (p.type) {
+    case "number":   return p.number ?? 0;
+    case "checkbox": return p.checkbox ? 1 : 0;
+    case "rich_text":
+    case "title":    return parseFloat(String(plain(p[p.type])).replace(/[^\d.-]/g, "")) || 0;
+    case "select":   return parseFloat(String(p.select?.name ?? "").replace(/[^\d.-]/g, "")) || 0;
+    case "relation": return (await relationIds(page, p)).length;
+
+    case "formula": {
+      const expr = def?.formula?.expression;
+      if (expr) {
+        try {
+          return await evalFormula(expr, (n) => resolveValue(page, n, depth + 1, [...trail, key]));
+        } catch (e) {
+          if (depth === 0) console.warn(`수식 직접계산 실패 [${key}]: ${e.message} → API 값 사용`);
+        }
+      }
+      const f = p.formula ?? {};
+      return f.type === "number" ? (f.number ?? 0) : f.type === "boolean" ? (f.boolean ? 1 : 0) : 0;
+    }
+
+    case "rollup": {
+      const cfg = def?.rollup ?? p.rollup ?? {};
+      const relName = cfg.relation_property_name;
+      const tgtName = cfg.rollup_property_name;
+      const fn = cfg.function ?? "sum";
+
+      if (relName && tgtName) {
+        const relKey = findKey(props, relName);
+        if (relKey && props[relKey].type === "relation") {
+          const ids = await relationIds(page, props[relKey]);
+          const targetDs = schema[relKey]?.relation?.data_source_id;
+          if (targetDs) await prefetchDs(targetDs);
+          const vals = await mapLimit(ids, 3, async (id) => {
+            const child = await pageOf(id, targetDs);
+            return child ? await resolveValue(child, tgtName, depth + 1, [...trail, key]) : NaN;
+          });
+          return aggregate(fn, vals);
+        }
+      }
+      const r = p.rollup ?? {};
+      if (r.type === "number" && r.number != null) return r.number;
+      if (r.type === "array") return aggregate(fn, r.array.map(it => it.type === "number" ? it.number ?? 0 : 0));
+      return 0;
+    }
+
+    default: return 0;
+  }
+};
+
+// ── 실행 ───────────────────────────────────────────────────────────────────
+await schemaOf(ROOT_DS);
+const rows = (await queryAll(ROOT_DS)).filter(r => titleOf(r.properties));
+rows.forEach(r => pageCache.set(r.id, r));
+console.log(`${rows.length}행 수집 (${ROOT_DS})`);
+
+const members = (await mapLimit(rows, 2, async (r) => {
   const name = titleOf(r.properties);
   const [goal, done, inProgress, order] = await Promise.all([
-    resolveGroup(r, "goal"),
-    resolveGroup(r, "done"),
-    resolveGroup(r, "inProgress"),
-    resolveGroup(r, "order")
+    resolveValue(r, "목표(Set)"),
+    resolveValue(r, "실(Set)"),
+    resolveValue(r, "진(Set)"),
+    resolveValue(r, "순서")
   ]);
-  for (const [k, v] of Object.entries({ 목표: goal, 실적: done, 진행중: inProgress })) {
-    if (!v.from) problems.push(`${name} / ${k} → ${(v.reasons ?? []).join(" | ")}`);
-    else if (v.fallback) problems.push(`${name} / ${k} → 폴백 사용(${(v.reasons ?? []).join(" | ")})`);
-    else if (v.value === 0 && v.reasons?.length) problems.push(`${name} / ${k} → ${v.reasons.join(" | ")}`);
-  }
   return {
-    name,
-    goal: goal.value,
-    done: done.value,
-    inProgress: inProgress.value,
-    order: order.value,
-    rate: goal.value ? Math.round((done.value / goal.value) * 100) : 0
+    name, goal, done, inProgress, order,
+    rate: goal ? Math.round((done / goal) * 100) : 0
   };
 })).sort((a, b) => (a.order || 999) - (b.order || 999));
 
@@ -329,39 +278,14 @@ const updated = new Intl.DateTimeFormat("ko-KR", {
   hour: "2-digit", minute: "2-digit", hour12: false
 }).format(new Date()).replace(/\. /g, ".").replace(/\.$/, "");
 
-await writeFile("data.json", JSON.stringify({ updated, members }, null, 2) + "\n", "utf8");
-
-console.log(`${members.length}명 동기화 완료 / 기준 ${updated}`);
+console.log(`기준 ${updated}`);
 members.forEach(m =>
   console.log(`  ${m.order}. ${m.name}  목표 ${m.goal} / 실적 ${m.done} / 진행중 ${m.inProgress} (${m.rate}%)`));
 
-if (problems.length) {
-  console.warn("⚠ 값 확보에 문제가 있던 항목:");
-  problems.slice(0, 30).forEach(p => console.warn("  - " + p));
+if (members.length && members.every(m => m.done === 0 && m.inProgress === 0) && members.some(m => m.goal > 0)) {
+  console.error("실적이 전원 0 → data.json 갱신을 중단합니다(기존 데이터 보존).");
+  process.exit(1);
 }
 
-// ── 전원 0 이면 DIAGNOSE 없이도 원본 응답을 자동 출력 ───────────────────────
-const dumpRow = async (row, why) => {
-  console.warn(`\n=== ${why} → "${titleOf(row.properties)}" 원본 덤프 ===`);
-  for (const [k, v] of Object.entries(row.properties)) {
-    if (!/실|진|목표|순서/.test(k)) continue;
-    console.warn(`\n[${k}] type=${v.type} id=${v.id}`);
-    console.warn("  쿼리값: " + JSON.stringify(v[v.type]));
-    if (["rollup", "formula", "relation"].includes(v.type)) {
-      try {
-        const res = await fetch(
-          `https://api.notion.com/v1/pages/${row.id}/properties/${encodeURIComponent(v.id)}?page_size=10`,
-          { headers: { Authorization: `Bearer ${TOKEN}`, "Notion-Version": VERSION } });
-        console.warn(`  속성엔드포인트(${res.status}): ` + (await res.text()).slice(0, 700));
-      } catch (e) {
-        console.warn(`  속성엔드포인트 실패: ${e.message}`);
-      }
-    }
-  }
-  console.warn("=== 덤프 끝 ===\n");
-};
-
-if (rows.length && (DIAGNOSE || members.every(m => m.done === 0 && m.inProgress === 0))) {
-  await dumpRow(rows[0], DIAGNOSE ? "DIAGNOSE=1" : "전원 실적/진행중 0");
-  console.warn("unsupported → 수식/롤업 중첩 문제, number=null 또는 404 → '직원' 관계 대상 DB 공유 누락.");
-}
+await writeFile("data.json", JSON.stringify({ updated, members }, null, 2) + "\n", "utf8");
+console.log(`${members.length}명 동기화 완료`);
