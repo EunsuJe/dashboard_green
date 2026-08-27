@@ -26,29 +26,29 @@
     font-family:'Pretendard','Apple SD Gothic Neo','Malgun Gothic',-apple-system,sans-serif;
     background:var(--bg);
     color:var(--text);
-    padding:28px 20px 60px;
+    padding:16px 20px 40px;
     -webkit-font-smoothing:antialiased;
   }
   .wrap{max-width:1040px;margin:0 auto}
 
-  /* 상단 영역 */
-  .top{display:grid;grid-template-columns:1.9fr 1fr 1fr 1fr;gap:14px;margin-bottom:18px}
+  /* 상단 영역 — 여백 축소 (폰트 크기는 원본 유지) */
+  .top{display:grid;grid-template-columns:1.9fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px}
   .hero{
     background:var(--card-alt);border:1px solid var(--border);
-    border-radius:14px;padding:26px 28px;
+    border-radius:14px;padding:16px 24px;
   }
-  .hero h1{font-size:29px;font-weight:800;letter-spacing:-.6px}
-  .hero p{margin-top:9px;font-size:14px;color:var(--muted);line-height:1.5}
+  .hero h1{font-size:29px;font-weight:800;letter-spacing:-.6px;line-height:1.2}
+  .hero p{margin-top:6px;font-size:14px;color:var(--muted);line-height:1.4}
   .badge{
-    display:inline-block;margin-top:16px;padding:7px 14px;border-radius:8px;
+    display:inline-block;margin-top:10px;padding:5px 12px;border-radius:8px;
     background:var(--green-bg);color:var(--green-tx);font-size:13px;font-weight:700;
   }
   .kpi{
     background:var(--card);border:1px solid var(--border);border-radius:14px;
-    padding:22px 20px;display:flex;flex-direction:column;justify-content:center;align-items:center;
+    padding:12px 18px;display:flex;flex-direction:column;justify-content:center;align-items:center;
   }
   .kpi .label{font-size:13px;color:var(--muted);font-weight:500}
-  .kpi .value{margin-top:14px;font-size:34px;font-weight:800;letter-spacing:-1px}
+  .kpi .value{margin-top:6px;font-size:34px;font-weight:800;letter-spacing:-1px;line-height:1.15}
   .kpi .unit{font-size:14px;font-weight:600;color:var(--muted);margin-left:3px}
 
   /* 인원 카드 */
@@ -158,8 +158,8 @@ render().catch(err => {
      Actions 탭에서 Sync 워크플로를 한 번 실행해 <b>data.json</b>이 생성되었는지 확인해 주세요.</div>`;
 });
 
-// 10분마다 자동 새로고침
-setInterval(() => render().catch(() => {}), 10 * 60 * 1000);
+// 3시간마다 자동 새로고침
+setInterval(() => render().catch(() => {}), 3 * 60 * 60 * 1000);
 </script>
 </body>
 </html>
