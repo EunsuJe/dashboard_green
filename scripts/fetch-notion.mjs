@@ -34,7 +34,7 @@ const mapLimit = async (items, limit, fn) => {
   return out;
 };
 
-// ── 캐시: 데이터 소스 스키마 / 페이지 ────────────────────────────────────────
+// ── 캐시 ───────────────────────────────────────────────────────────────────
 const schemaCache = new Map();   // dsId → properties
 const pageCache   = new Map();   // pageId → page
 const prefetched  = new Set();   // 통째로 읽어둔 dsId
@@ -58,12 +58,13 @@ const queryAll = async (dsId) => {
   return rows;
 };
 
+// 자식 페이지를 한 건씩 가져오지 않고 데이터 소스 단위로 한 번에 캐싱
 const prefetchDs = async (dsId) => {
   if (prefetched.has(dsId)) return;
   prefetched.add(dsId);
   try {
     for (const pg of await queryAll(dsId)) pageCache.set(pg.id, pg);
-  } catch (e) { console.warn(`데이터소스 프리페치 실패 ${dsId}: ${e.message}`); }
+  } catch (e) { console.warn(`프리페치 실패 ${dsId}: ${e.message}`); }
 };
 
 const pageOf = async (pageId, dsHint) => {
@@ -90,7 +91,6 @@ const findKey = (obj, name) =>
 
 const dsIdOfPage = (page) => page?.parent?.data_source_id ?? null;
 
-// 관계 대상 ID 목록 (25개 초과 시 속성 엔드포인트로 페이지네이션)
 const relationIds = async (page, prop) => {
   if (Array.isArray(prop.relation) && prop.relation.length < 25) return prop.relation.map(r => r.id);
   const ids = []; let cursor;
@@ -103,82 +103,6 @@ const relationIds = async (page, prop) => {
   return ids;
 };
 
-// ── 수식 평가기: prop("x"), 숫자, + - * / ( ), 소수 함수 ─────────────────────
-const FUNCS = {
-  round: (x) => Math.round(x), abs: Math.abs, floor: Math.floor, ceil: Math.ceil,
-  min: (...a) => Math.min(...a), max: (...a) => Math.max(...a),
-  tonumber: (x) => Number(x) || 0, unaryminus: (x) => -x
-};
-
-const evalFormula = async (expr, resolveProp) => {
-  // 토큰화
-  const tokens = [];
-  const re = /\s*(prop\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)|[A-Za-z_]\w*|\d+(?:\.\d+)?|[()+\-*/,])/y;
-  let pos = 0;
-  while (pos < expr.length) {
-    re.lastIndex = pos;
-    const m = re.exec(expr);
-    if (!m) throw new Error(`파싱 불가: ${expr.slice(pos, pos + 20)}`);
-    pos = re.lastIndex;
-    if (m[2] !== undefined) tokens.push({ t: "prop", v: m[2].replace(/\\"/g, '"') });
-    else if (/^\d/.test(m[1])) tokens.push({ t: "num", v: parseFloat(m[1]) });
-    else if (/^[A-Za-z_]/.test(m[1])) tokens.push({ t: "id", v: m[1].toLowerCase() });
-    else tokens.push({ t: m[1] });
-  }
-
-  let i = 0;
-  const peek = () => tokens[i];
-  const eat = (t) => { if (tokens[i]?.t !== t) throw new Error(`'${t}' 기대`); return tokens[i++]; };
-
-  const parseExpr = async () => {
-    let v = await parseTerm();
-    while (peek()?.t === "+" || peek()?.t === "-") {
-      const op = tokens[i++].t, r = await parseTerm();
-      v = op === "+" ? v + r : v - r;
-    }
-    return v;
-  };
-  const parseTerm = async () => {
-    let v = await parseUnary();
-    while (peek()?.t === "*" || peek()?.t === "/") {
-      const op = tokens[i++].t, r = await parseUnary();
-      v = op === "*" ? v * r : (r === 0 ? 0 : v / r);
-    }
-    return v;
-  };
-  const parseUnary = async () => {
-    if (peek()?.t === "-") { i++; return -(await parseUnary()); }
-    return parseAtom();
-  };
-  const parseAtom = async () => {
-    const tk = peek();
-    if (!tk) throw new Error("수식이 갑자기 끝남");
-    if (tk.t === "num")  { i++; return tk.v; }
-    if (tk.t === "prop") { i++; return await resolveProp(tk.v); }
-    if (tk.t === "(")    { i++; const v = await parseExpr(); eat(")"); return v; }
-    if (tk.t === "id") {
-      i++;
-      const fn = FUNCS[tk.v];
-      if (peek()?.t !== "(") throw new Error(`알 수 없는 식별자 ${tk.v}`);
-      i++;
-      const args = [];
-      if (peek()?.t !== ")") {
-        args.push(await parseExpr());
-        while (peek()?.t === ",") { i++; args.push(await parseExpr()); }
-      }
-      eat(")");
-      if (!fn) throw new Error(`미지원 함수 ${tk.v}`);
-      return fn(...args);
-    }
-    throw new Error(`예상치 못한 토큰 ${tk.t}`);
-  };
-
-  const out = await parseExpr();
-  if (i !== tokens.length) throw new Error("수식 잔여 토큰");
-  return Number.isFinite(out) ? out : 0;
-};
-
-// ── 핵심: 속성 값을 재귀적으로 직접 계산 ────────────────────────────────────
 const aggregate = (fn, values) => {
   const nums = values.filter(v => Number.isFinite(v));
   switch (fn) {
@@ -193,7 +117,8 @@ const aggregate = (fn, values) => {
   }
 };
 
-const resolveValue = async (page, propName, depth = 0, trail = []) => {
+// ── 값 해석: 수식은 API 값 신뢰, 중첩 롤업만 직접 계산 ──────────────────────
+const resolveValue = async (page, propName, depth = 0) => {
   if (!page || depth > MAX_DEPTH) return 0;
   const props = page.properties ?? {};
   const key = findKey(props, propName);
@@ -212,16 +137,12 @@ const resolveValue = async (page, propName, depth = 0, trail = []) => {
     case "relation": return (await relationIds(page, p)).length;
 
     case "formula": {
-      const expr = def?.formula?.expression;
-      if (expr) {
-        try {
-          return await evalFormula(expr, (n) => resolveValue(page, n, depth + 1, [...trail, key]));
-        } catch (e) {
-          if (depth === 0) console.warn(`수식 직접계산 실패 [${key}]: ${e.message} → API 값 사용`);
-        }
-      }
+      // 자식 레벨 수식은 Notion이 정상 계산해 주므로 그대로 사용한다.
       const f = p.formula ?? {};
-      return f.type === "number" ? (f.number ?? 0) : f.type === "boolean" ? (f.boolean ? 1 : 0) : 0;
+      if (f.type === "number")  return f.number ?? 0;
+      if (f.type === "boolean") return f.boolean ? 1 : 0;
+      if (f.type === "string")  return parseFloat(String(f.string).replace(/[^\d.-]/g, "")) || 0;
+      return 0;
     }
 
     case "rollup": {
@@ -230,6 +151,10 @@ const resolveValue = async (page, propName, depth = 0, trail = []) => {
       const tgtName = cfg.rollup_property_name;
       const fn = cfg.function ?? "sum";
 
+      const r = p.rollup ?? {};
+      if (r.type === "number" && r.number) return r.number;   // 0이 아닌 값이면 신뢰
+
+      // 중첩이라 API가 0을 준 경우: 관계를 펼쳐 자식 값을 직접 집계
       if (relName && tgtName) {
         const relKey = findKey(props, relName);
         if (relKey && props[relKey].type === "relation") {
@@ -238,14 +163,16 @@ const resolveValue = async (page, propName, depth = 0, trail = []) => {
           if (targetDs) await prefetchDs(targetDs);
           const vals = await mapLimit(ids, 3, async (id) => {
             const child = await pageOf(id, targetDs);
-            return child ? await resolveValue(child, tgtName, depth + 1, [...trail, key]) : NaN;
+            return child ? await resolveValue(child, tgtName, depth + 1) : NaN;
           });
-          return aggregate(fn, vals);
+          const out = aggregate(fn, vals);
+          if (depth === 0) console.log(`    ↳ ${key}: ${ids.length}건 → [${vals.join(", ")}] = ${out}`);
+          return out;
         }
       }
-      const r = p.rollup ?? {};
-      if (r.type === "number" && r.number != null) return r.number;
-      if (r.type === "array") return aggregate(fn, r.array.map(it => it.type === "number" ? it.number ?? 0 : 0));
+      if (r.type === "array") {
+        return aggregate(fn, r.array.map(it => it.type === "number" ? it.number ?? 0 : 0));
+      }
       return 0;
     }
 
@@ -261,16 +188,12 @@ console.log(`${rows.length}행 수집 (${ROOT_DS})`);
 
 const members = (await mapLimit(rows, 2, async (r) => {
   const name = titleOf(r.properties);
-  const [goal, done, inProgress, order] = await Promise.all([
-    resolveValue(r, "목표(Set)"),
-    resolveValue(r, "실(Set)"),
-    resolveValue(r, "진(Set)"),
-    resolveValue(r, "순서")
-  ]);
-  return {
-    name, goal, done, inProgress, order,
-    rate: goal ? Math.round((done / goal) * 100) : 0
-  };
+  console.log(`[${name}]`);
+  const goal       = await resolveValue(r, "목표(Set)");
+  const done       = await resolveValue(r, "실(Set)");
+  const inProgress = await resolveValue(r, "진(Set)");
+  const order      = await resolveValue(r, "순서");
+  return { name, goal, done, inProgress, order, rate: goal ? Math.round((done / goal) * 100) : 0 };
 })).sort((a, b) => (a.order || 999) - (b.order || 999));
 
 const updated = new Intl.DateTimeFormat("ko-KR", {
@@ -278,10 +201,11 @@ const updated = new Intl.DateTimeFormat("ko-KR", {
   hour: "2-digit", minute: "2-digit", hour12: false
 }).format(new Date()).replace(/\. /g, ".").replace(/\.$/, "");
 
-console.log(`기준 ${updated}`);
+console.log(`\n기준 ${updated}`);
 members.forEach(m =>
   console.log(`  ${m.order}. ${m.name}  목표 ${m.goal} / 실적 ${m.done} / 진행중 ${m.inProgress} (${m.rate}%)`));
 
+// 전원 0이면 기존 data.json 을 보존하고 실패 처리
 if (members.length && members.every(m => m.done === 0 && m.inProgress === 0) && members.some(m => m.goal > 0)) {
   console.error("실적이 전원 0 → data.json 갱신을 중단합니다(기존 데이터 보존).");
   process.exit(1);
