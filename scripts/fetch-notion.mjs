@@ -68,18 +68,24 @@ const num = (p) => {
   }
 };
 
-// 아래 두 경우엔 DB 쿼리 응답만으로 정확한 값을 알 수 없어
-// 속성 전용 엔드포인트(pages/{id}/properties/{prop_id})로 다시 조회해야 함:
+// 아래 경우엔 DB 쿼리(POST /databases/{id}/query) 응답만으로 정확한
+// 값을 알 수 없어 속성 전용 엔드포인트(pages/{id}/properties/{prop_id})로
+// 다시 조회해야 함:
 //  1) 롤업/관계가 25개 이상이라 배열이 페이지당 잘려서 온 경우
 //  2) 롤업이 "incomplete" 상태 - Notion이 DB 쿼리 시점엔 관계형 롤업 계산을
 //     끝내지 못해 값 없이 반환하는 경우가 있음(문서화되지 않은 동작).
-//     이걸 처리하지 않으면 rollup 기반 실적/진행중 값이 항상 0으로 나온다.
+//  3) formula 타입 속성 - '실적(Set)'/'진행중(Set)'처럼 롤업 값을 참조하는
+//     수식은, DB 쿼리 시점에 그 롤업이 아직 최신 값으로 재계산되지 않은
+//     상태의 결과를 그대로 돌려주는 경우가 있어 0으로 보일 수 있다.
+//     항상 속성 전용 엔드포인트로 재조회하면 그 순간 재계산된 최신 값을
+//     받을 수 있어 이 문제를 피할 수 있다.
 const isTruncated = (p) =>
   !!p && (
     (p.type === "rollup"   && p.rollup?.type === "array" && p.rollup.array.length >= 25) ||
     (p.type === "relation" && Array.isArray(p.relation) && p.relation.length >= 25) ||
     (p.type === "rollup"   && p.rollup?.type === "number" && p.rollup.number == null) ||
-    (p.type === "rollup"   && p.rollup?.type === "incomplete")
+    (p.type === "rollup"   && p.rollup?.type === "incomplete") ||
+    (p.type === "formula")
   );
 
 const numDeep = async (pageId, p) => {
@@ -163,76 +169,7 @@ console.log(`${members.length}명 동기화 완료 / 기준 ${updated}`);
 if (zero === members.length && members.length > 0) {
   console.warn("⚠ 전원 실적/진행중이 0입니다. 원본 속성 구조를 자동 출력합니다 (DEBUG 없이도 확인 가능):");
   if (rows[0]) dumpRow(rows[0]);
-  console.warn("→ 위 목록에서 '실적'/'진행중' 관련 컬럼의 type과 실제 값을 확인하세요.");
-  console.warn("  - rollup인데 값이 null/빈 배열이면: 롤업이 참조하는 원본 관계형 DB가 이 integration에 연결(Share)되지 않았을 가능성이 높습니다.");
-  console.warn("  - formula/rollup 결과 타입이 date/string 등 숫자가 아니면 집계 로직 보완이 필요합니다.");
-
-  // relation 속성이 빈 배열이면, 그 relation이 가리키는 대상 DB에
-  // integration이 실제로 접근 가능한지 자동으로 검사해서 원인을 확정한다.
-  try {
-    const schema = await get(`databases/${DB_ID}`);
-    console.warn(`→ [진단] GET /databases/${DB_ID} 응답: object=${schema.object}, data_sources=${JSON.stringify(schema.data_sources ?? "없음")}`);
-    console.warn(`→ [진단] schema.properties 키 목록: ${schema.properties ? Object.keys(schema.properties).join(", ") : "properties 필드 자체가 없음"}`);
-    if (schema.properties) {
-      for (const [k, v] of Object.entries(schema.properties)) {
-        console.warn(`   ${k} → ${v.type}`);
-      }
-    }
-
-    const relationProps = Object.entries(schema.properties ?? {})
-      .filter(([, v]) => v.type === "relation");
-    const rollupProps = Object.entries(schema.properties ?? {})
-      .filter(([, v]) => v.type === "rollup");
-
-    if (relationProps.length === 0) {
-      console.warn("→ 이 DB 스키마 응답에는 relation(관계) 속성이 없습니다. (위 [진단] 로그로 실제 원인 확인 필요 — 예: 다중 데이터소스 DB로 전환되어 2022-06-28 버전에서 properties가 예전과 다르게 내려올 수 있음)");
-    }
-
-    // 롤업이 정확히 어떤 relation/속성을 집계 대상으로 삼는지 확인
-    for (const [propName, propDef] of rollupProps) {
-      const rc = propDef.rollup ?? {};
-      console.warn(`→ [진단] rollup "${propName}" 설정: relation_property_name=${rc.relation_property_name}, rollup_property_name=${rc.rollup_property_name}, function=${rc.function}`);
-    }
-
-    for (const [propName, propDef] of relationProps) {
-      const relatedDbId = propDef.relation?.database_id;
-      const emptyInRow0 = rows[0]?.properties?.[propName]?.relation?.length === 0;
-      console.warn(`→ relation "${propName}" → 대상 DB: ${relatedDbId} (첫 행 값 비어있음: ${emptyInRow0})`);
-      if (!relatedDbId) continue;
-      try {
-        const targetSchema = await get(`databases/${relatedDbId}`);
-        console.warn(`  ✓ integration이 대상 DB(${relatedDbId})에 접근 가능합니다.`);
-        console.warn(`  → 대상 DB 속성 목록: ${targetSchema.properties ? Object.keys(targetSchema.properties).join(", ") : "없음"}`);
-        // 이 relation을 참조하는 rollup이 실제로 집계하려는 속성이
-        // 대상 DB에 존재하는지, 어떤 타입인지 확인
-        for (const [rname, rdef] of rollupProps) {
-          if (rdef.rollup?.relation_property_name !== propName) continue;
-          const targetPropName = rdef.rollup.rollup_property_name;
-          const targetProp = targetSchema.properties?.[targetPropName];
-          console.warn(`  → rollup "${rname}"이 집계하는 대상 속성 "${targetPropName}" → 대상 DB에서 타입: ${targetProp ? targetProp.type : "★ 대상 DB에 해당 이름의 속성이 없음(integration에 이 속성이 안 보일 수 있음)"}`);
-        }
-      } catch (e) {
-        console.warn(`  ✗ integration이 대상 DB(${relatedDbId})에 접근할 수 없습니다: ${e.message}`);
-        console.warn(`    → Notion에서 해당 DB(예: 영업활동DB)를 열어 우측 상단 '...' → 연결(Connections)에서`);
-        console.warn(`      이 integration을 추가/공유해야 relation·rollup 값이 채워집니다.`);
-      }
-    }
-
-    // 첫 행 페이지를 속성 전용 엔드포인트로 직접 재조회해서
-    // "실(Set)"/"진(Set)" 롤업의 실제 원시 응답을 확인
-    if (rows[0]) {
-      for (const [rname] of rollupProps) {
-        const rp = rows[0].properties[rname];
-        if (!rp) continue;
-        try {
-          const fresh = await get(`pages/${rows[0].id}/properties/${encodeURIComponent(rp.id)}?page_size=100`);
-          console.warn(`→ [진단] 페이지 속성 재조회 "${rname}" 원시 응답: ${JSON.stringify(fresh).slice(0, 500)}`);
-        } catch (e) {
-          console.warn(`→ [진단] 페이지 속성 재조회 "${rname}" 실패: ${e.message}`);
-        }
-      }
-    }
-  } catch (e) {
-    console.warn(`DB 스키마 조회 실패, relation 대상 진단을 건너뜁니다: ${e.message}`);
-  }
+  console.warn("→ '실적(Set)'/'진행중(Set)' formula 값은 항상 속성 전용 엔드포인트로 재조회하도록");
+  console.warn("  되어 있으니(isTruncated에 formula 포함), 위 값이 여전히 0이면 Notion 원본 데이터/");
+  console.warn("  수식 자체를 다시 확인해 주세요.");
 }
