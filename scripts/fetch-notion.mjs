@@ -118,13 +118,15 @@ do {
   cursor = data.has_more ? data.next_cursor : null;
 } while (cursor);
 
-if (DEBUG && rows[0]) {
-  console.log("--- 첫 행 속성 타입 ---");
-  for (const [k, v] of Object.entries(rows[0].properties)) {
+const dumpRow = (row) => {
+  console.log(`--- "${title(row.properties)}" 행 속성 타입 ---`);
+  for (const [k, v] of Object.entries(row.properties)) {
     console.log(`${k} → ${v.type} :: ${JSON.stringify(v[v.type])}`);
   }
   console.log("----------------------");
-}
+};
+
+if (DEBUG && rows[0]) dumpRow(rows[0]);
 
 const members = [];
 for (const r of rows) {
@@ -147,8 +149,12 @@ const updated = new Intl.DateTimeFormat("ko-KR", {
 
 await writeFile("data.json", JSON.stringify({ updated, members }, null, 2) + "\n", "utf8");
 
-const zero = members.filter(m => m.done === 0).length;
+const zero = members.filter(m => m.done === 0 && m.inProgress === 0).length;
 console.log(`${members.length}명 동기화 완료 / 기준 ${updated}`);
 if (zero === members.length && members.length > 0) {
-  console.warn("⚠ 전원 실적 0입니다. DEBUG=1 로 실행해 속성 타입을 확인하고, 롤업이 참조하는 원본 DB가 integration에 연결됐는지 확인하세요.");
+  console.warn("⚠ 전원 실적/진행중이 0입니다. 원본 속성 구조를 자동 출력합니다 (DEBUG 없이도 확인 가능):");
+  if (rows[0]) dumpRow(rows[0]);
+  console.warn("→ 위 목록에서 '실적'/'진행중' 관련 컬럼의 type과 실제 값을 확인하세요.");
+  console.warn("  - rollup인데 값이 null/빈 배열이면: 롤업이 참조하는 원본 관계형 DB가 이 integration에 연결(Share)되지 않았을 가능성이 높습니다.");
+  console.warn("  - formula/rollup 결과 타입이 date/string 등 숫자가 아니면 집계 로직 보완이 필요합니다.");
 }
