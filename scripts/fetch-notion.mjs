@@ -190,8 +190,8 @@ const members = (await mapLimit(rows, 2, async (r) => {
   const name = titleOf(r.properties);
   console.log(`[${name}]`);
   const goal       = await resolveValue(r, "목표(Set)");
-  const done       = await resolveValue(r, "실(Set)");
-  const inProgress = await resolveValue(r, "진(Set)");
+  const done       = await resolveValue(r, "실적(Set)");
+  const inProgress = await resolveValue(r, "진행중(Set)");
   const order      = await resolveValue(r, "순서");
   return { name, goal, done, inProgress, order, rate: goal ? Math.round((done / goal) * 100) : 0 };
 })).sort((a, b) => (a.order || 999) - (b.order || 999));
