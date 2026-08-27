@@ -1,237 +1,295 @@
 import { writeFile } from "node:fs/promises";
 
-// ── 대상: https://app.notion.com/p/3b11fd972c80807589b1dfe336b24d10?v=...
 const DEFAULT_URL =
   "https://app.notion.com/p/3b11fd972c80807589b1dfe336b24d10?v=3b11fd972c8080938176000cd8c76dac";
 
-const TOKEN     = process.env.NOTION_TOKEN;
-const RAW_REF   = process.env.NOTION_DB_ID || process.env.NOTION_URL || DEFAULT_URL;
-const DS_ENV    = process.env.NOTION_DATA_SOURCE_ID || "";   // 있으면 탐색 생략
-const DEBUG     = process.env.DEBUG === "1";
+const TOKEN    = process.env.NOTION_TOKEN;
+const RAW_REF  = process.env.NOTION_DB_ID || process.env.NOTION_URL || DEFAULT_URL;
+const DS_ENV   = process.env.NOTION_DATA_SOURCE_ID || "";
+const REL_PROP = process.env.RELATION_PROP || "직원";   // 폴백 계산에 쓸 관계 컬럼
+const DIAGNOSE = process.env.DIAGNOSE === "1";
+const VERSION  = process.env.NOTION_VERSION || "2025-09-03";
 
-const V_NEW = "2025-09-03";   // 데이터 소스 분리 이후
-const V_OLD = "2022-06-28";   // 폴백용
-
-if (!TOKEN) {
-  console.error("NOTION_TOKEN 시크릿이 설정되지 않았습니다.");
-  process.exit(1);
-}
+if (!TOKEN) { console.error("NOTION_TOKEN 이 없습니다."); process.exit(1); }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// URL / 하이픈 없는 ID / 하이픈 있는 ID 모두 허용
 const toId = (ref) => {
-  const m = String(ref).match(/[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-  if (!m) throw new Error(`ID를 추출할 수 없습니다: ${ref}`);
+  const m = String(ref).match(/[0-9a-f]{32}|[0-9a-f-]{36}/i);
+  if (!m) throw new Error(`ID 추출 실패: ${ref}`);
   const h = m[0].replace(/-/g, "").toLowerCase();
   return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
 };
 
-// ── HTTP (429/5xx 재시도 + 버전 지정 가능)
-const request = async (path, { version = V_NEW, ...options } = {}, attempt = 0) => {
+const request = async (path, { version = VERSION, ...opt } = {}, attempt = 0) => {
   const res = await fetch(`https://api.notion.com/v1/${path}`, {
-    ...options,
+    ...opt,
     headers: {
-      "Authorization": `Bearer ${TOKEN}`,
+      Authorization: `Bearer ${TOKEN}`,
       "Notion-Version": version,
       "Content-Type": "application/json"
     }
   });
   if (res.status === 429 || res.status >= 500) {
-    if (attempt >= 4) throw new Error(`${res.status} ${await res.text()}`);
+    if (attempt >= 4) throw Object.assign(new Error(`${res.status} ${await res.text()}`), { status: res.status });
     const wait = Number(res.headers.get("retry-after") || 0) * 1000 || 500 * 2 ** attempt;
     await sleep(wait);
-    return request(path, { version, ...options }, attempt + 1);
+    return request(path, { version, ...opt }, attempt + 1);
   }
-  if (!res.ok) {
-    const err = new Error(`${res.status} ${await res.text()}`);
-    err.status = res.status;
-    throw err;
-  }
+  if (!res.ok) throw Object.assign(new Error(`${res.status} ${await res.text()}`), { status: res.status });
   return res.json();
 };
+const post = (p, b, v) => request(p, { method: "POST", body: JSON.stringify(b), version: v });
+const get  = (p, v) => request(p, { method: "GET", version: v });
 
-const post = (path, body, version) => request(path, { method: "POST", body: JSON.stringify(body), version });
-const get  = (path, version) => request(path, { method: "GET", version });
-
-// 동시 요청 제한 (Notion 권장 ~3 rps)
 const mapLimit = async (items, limit, fn) => {
   const out = new Array(items.length);
   let i = 0;
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (i < items.length) {
-      const idx = i++;
-      out[idx] = await fn(items[idx], idx);
-    }
+    while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); }
   }));
   return out;
 };
 
-// ── 값 추출
-const toNumber = (v) => {
-  const n = parseFloat(String(v ?? "").replace(/[^\d.-]/g, ""));
-  return Number.isFinite(n) ? n : 0;
-};
+// ── 값 파싱: 반드시 {ok, value} 로 반환해 "못 읽음"과 "진짜 0"을 구분한다 ──────────
+const FAIL = (reason) => ({ ok: false, value: 0, reason });
+const OK   = (value)  => ({ ok: true, value });
 
-const num = (p) => {
-  if (!p) return 0;
+const parseNum = (v) => {
+  const n = parseFloat(String(v ?? "").replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : null;
+};
+const plain = (arr) => (Array.isArray(arr) ? arr.map(t => t.plain_text).join("") : arr?.plain_text ?? "");
+
+// 재조회 없이 즉시 판정 가능한 값
+const readShallow = (p) => {
+  if (!p) return FAIL("속성 없음");
   switch (p.type) {
-    case "number":    return p.number ?? 0;
-    case "rich_text": return toNumber((p.rich_text?.map?.(t => t.plain_text) ?? [p.rich_text?.plain_text]).join(""));
-    case "title":     return toNumber((p.title?.map?.(t => t.plain_text) ?? [p.title?.plain_text]).join(""));
-    case "select":    return toNumber(p.select?.name);
-    // DB 쿼리 응답은 배열, 속성 엔드포인트 응답은 단일 객체 → 둘 다 처리
-    case "relation":  return Array.isArray(p.relation) ? p.relation.length : (p.relation ? 1 : 0);
-    case "checkbox":  return p.checkbox ? 1 : 0;
+    case "number":    return p.number == null ? OK(0) : OK(p.number);
+    case "checkbox":  return OK(p.checkbox ? 1 : 0);
+    case "rich_text":
+    case "title": {
+      const n = parseNum(plain(p[p.type]));
+      return n == null ? FAIL("숫자 아님") : OK(n);
+    }
+    case "select":    { const n = parseNum(p.select?.name); return n == null ? FAIL("숫자 아님") : OK(n); }
+    case "relation":  return Array.isArray(p.relation) ? OK(p.relation.length) : (p.relation ? OK(1) : OK(0));
     case "formula": {
       const f = p.formula ?? {};
-      if (f.type === "number")  return f.number ?? 0;
-      if (f.type === "string")  return toNumber(f.string);
-      if (f.type === "boolean") return f.boolean ? 1 : 0;
-      return 0;
+      if (f.type === "number")      return f.number == null ? FAIL("formula number=null") : OK(f.number);
+      if (f.type === "boolean")     return OK(f.boolean ? 1 : 0);
+      if (f.type === "string")      { const n = parseNum(f.string); return n == null ? FAIL("formula 문자열") : OK(n); }
+      if (f.type === "unsupported") return FAIL("formula unsupported (롤업 중첩 → API 계산 불가)");
+      return FAIL(`formula ${f.type}`);
     }
     case "rollup": {
       const r = p.rollup ?? {};
-      if (r.type === "number") return r.number ?? 0;
-      if (r.type === "array")  return r.array.reduce((s, it) => s + num(it), 0);
-      return 0; // incomplete → numDeep에서 재조회
+      if (r.type === "number")      return r.number == null ? FAIL("rollup number=null") : OK(r.number);
+      if (r.type === "unsupported") return FAIL("rollup unsupported");
+      if (r.type === "incomplete")  return FAIL("rollup incomplete");
+      if (r.type === "array") {
+        if (r.array.length >= 25) return FAIL("rollup array 25개 절단");
+        let sum = 0;
+        for (const it of r.array) { const v = readShallow(it); if (v.ok) sum += v.value; }
+        return OK(sum);
+      }
+      return FAIL(`rollup ${r.type}`);
     }
-    default: return 0;
+    default: return FAIL(`미지원 타입 ${p.type}`);
   }
 };
 
-// 쿼리 응답만으로 정확한 값을 알 수 없어 pages/{id}/properties/{prop_id} 재조회가 필요한 경우
-const isTruncated = (p) =>
-  !!p && (
-    (p.type === "rollup"   && p.rollup?.type === "array" && p.rollup.array.length >= 25) ||
-    (p.type === "relation" && Array.isArray(p.relation) && p.relation.length >= 25) ||
-    (p.type === "rollup"   && p.rollup?.type === "number" && p.rollup.number == null) ||
-    (p.type === "rollup"   && p.rollup?.type === "incomplete") ||
-    (p.type === "formula")   // 롤업 참조 수식은 쿼리 시점 값이 낡아 있을 수 있음
-  );
+// 속성 전용 엔드포인트 재조회. 롤업은 results 합계가 아니라 property_item.rollup 을 본다.
+const readDeep = async (pageId, p) => {
+  const first = readShallow(p);
+  if (first.ok) return first;
+  if (!["formula", "rollup", "relation"].includes(p?.type)) return first;
 
-const numDeep = async (pageId, p) => {
-  if (!p) return 0;
-  if (!isTruncated(p)) return num(p);
   try {
-    let total = 0, cursor, aggregate = null;
+    let cursor, lastRollup = null, listSum = 0, sawList = false;
     do {
       const qs = cursor ? `?page_size=100&start_cursor=${cursor}` : "?page_size=100";
       const data = await get(`pages/${pageId}/properties/${encodeURIComponent(p.id)}${qs}`);
-      if (data.object !== "list") return num(data);
-      total += data.results.reduce((s, it) => s + num(it), 0);
-      const agg = data.property_item?.rollup;
-      if (agg && agg.type === "number" && agg.number != null) aggregate = agg.number;
+      if (data.object !== "list") return readShallow(data);      // 단일 값 응답(수식 등)
+      sawList = true;
+      for (const it of data.results) { const v = readShallow(it); if (v.ok) listSum += v.value; }
+      if (data.property_item?.type === "rollup") lastRollup = data.property_item.rollup;
       cursor = data.has_more ? data.next_cursor : null;
     } while (cursor);
-    return aggregate ?? total;
+
+    if (lastRollup) {
+      if (lastRollup.type === "number" && lastRollup.number != null) return OK(lastRollup.number);
+      if (lastRollup.type === "unsupported") return FAIL("rollup unsupported (재조회 후에도)");
+    }
+    return sawList ? OK(listSum) : first;
   } catch (e) {
-    console.warn(`속성 재조회 실패(${p.id}): ${e.message}`);
-    return num(p);
+    return FAIL(`재조회 실패: ${e.message}`);
   }
 };
 
-const title = (props) => {
+const titleOf = (props) => {
   const t = Object.values(props).find(p => p.type === "title");
-  return t ? t.title.map(x => x.plain_text).join("").trim() : "";
+  return t ? plain(t.title).trim() : "";
 };
 
-const normalize = (s) => s.replace(/[\s()（）]/g, "");
-const pick = (props, ...keys) => {
-  const found = Object.keys(props).find(k => keys.some(w => normalize(k).includes(normalize(w))));
-  if (!found) console.warn(`속성 못 찾음: [${keys.join(", ")}] / 실제 키: ${Object.keys(props).join(" | ")}`);
-  return found ? props[found] : null;
+const normalize = (s) => s.replace(/[\s()（）]/g, "").toLowerCase();
+
+// 키워드에 걸리는 후보를 전부 모아 타입 선호 순으로 정렬 (number → rollup → formula)
+const RANK = { number: 0, rollup: 1, formula: 2, rich_text: 3, select: 4, checkbox: 5, relation: 6 };
+const candidates = (props, keys) =>
+  Object.entries(props)
+    .filter(([k]) => keys.some(w => normalize(k).includes(normalize(w))))
+    .map(([k, v]) => ({ key: k, prop: v }))
+    .sort((a, b) => (RANK[a.prop.type] ?? 9) - (RANK[b.prop.type] ?? 9));
+
+const GROUPS = {
+  goal:       { keys: ["목표"],                    label: "목표" },
+  done:       { keys: ["실적", "실"],              label: "실적" },
+  inProgress: { keys: ["진행중", "진행 중", "진"], label: "진행중" },
+  order:      { keys: ["순서"],                    label: "순서" }
 };
 
-// ── 1) URL의 ID → data_source_id 해석
+// ── 데이터 소스 해석 ────────────────────────────────────────────────────────
 const resolveSource = async (ref) => {
   const id = toId(ref);
   if (DS_ENV) return { mode: "data_source", id: toId(DS_ENV) };
-
-  // (a) 데이터베이스로 시도
   try {
-    const db = await get(`databases/${id}`, V_NEW);
+    const db = await get(`databases/${id}`);
     const list = db.data_sources ?? [];
     if (list.length > 1) {
-      console.warn(`데이터 소스가 ${list.length}개입니다. 첫 번째(${list[0].name})를 사용합니다. ` +
-                   `다른 소스를 쓰려면 NOTION_DATA_SOURCE_ID를 지정하세요.`);
+      console.warn(`데이터 소스 ${list.length}개 → 첫 번째 사용. 다른 것은 NOTION_DATA_SOURCE_ID 로 지정:`);
       list.forEach(d => console.warn(`  - ${d.name}: ${d.id}`));
     }
-    if (list.length) return { mode: "data_source", id: list[0].id, dbTitle: db.title?.[0]?.plain_text };
-    return { mode: "database", id }; // 구형 응답(데이터 소스 미분리)
-  } catch (e) {
-    if (e.status !== 404 && e.status !== 400) throw e;
-  }
+    if (list.length) return { mode: "data_source", id: list[0].id };
+    return { mode: "database", id };
+  } catch (e) { if (e.status !== 404 && e.status !== 400) throw e; }
 
-  // (b) 페이지로 보고 자식 블록에서 인라인 DB 찾기
   try {
     let cursor;
     do {
       const qs = cursor ? `?page_size=100&start_cursor=${cursor}` : "?page_size=100";
-      const kids = await get(`blocks/${id}/children${qs}`, V_NEW);
+      const kids = await get(`blocks/${id}/children${qs}`);
       const child = kids.results.find(b => b.type === "child_database");
       if (child) return resolveSource(child.id);
       cursor = kids.has_more ? kids.next_cursor : null;
     } while (cursor);
-  } catch { /* 아래 안내로 */ }
+  } catch { /* fallthrough */ }
 
-  throw new Error(
-    `대상을 찾을 수 없습니다(${id}).\n` +
-    `→ Notion에서 해당 DB의 ••• 메뉴 > 연결(Connections)에서 통합을 초대했는지 확인하세요.\n` +
-    `→ 또는 DB 설정 > 데이터 소스 관리 > "데이터 소스 ID 복사"로 얻은 값을 ` +
-    `NOTION_DATA_SOURCE_ID 시크릿에 넣어주세요.`
-  );
+  throw new Error(`대상을 찾을 수 없습니다(${id}). DB의 ••• > 연결 에서 통합을 초대했는지 확인하세요.`);
 };
 
 const src = await resolveSource(RAW_REF);
-console.log(`대상: ${src.mode} ${src.id}${src.dbTitle ? ` (${src.dbTitle})` : ""}`);
 
-// ── 2) 전체 행 수집 (신 엔드포인트 우선, 실패 시 구 엔드포인트 폴백)
 const queryAll = async () => {
-  const attempts = src.mode === "data_source"
-    ? [{ path: `data_sources/${src.id}/query`, version: V_NEW },
-       { path: `databases/${toId(RAW_REF)}/query`, version: V_OLD }]
-    : [{ path: `databases/${src.id}/query`, version: V_OLD }];
-
-  for (const [i, a] of attempts.entries()) {
+  const tries = src.mode === "data_source"
+    ? [{ p: `data_sources/${src.id}/query`, v: VERSION }, { p: `databases/${toId(RAW_REF)}/query`, v: "2022-06-28" }]
+    : [{ p: `databases/${src.id}/query`, v: "2022-06-28" }];
+  for (const [i, t] of tries.entries()) {
     try {
-      const rows = [];
-      let cursor;
+      const rows = []; let cursor;
       do {
-        const data = await post(a.path, { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) }, a.version);
-        rows.push(...data.results);
-        cursor = data.has_more ? data.next_cursor : null;
+        const d = await post(t.p, { page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) }, t.v);
+        rows.push(...d.results);
+        cursor = d.has_more ? d.next_cursor : null;
       } while (cursor);
-      if (i > 0) console.warn(`구버전 엔드포인트(${a.version})로 폴백했습니다.`);
       return rows;
     } catch (e) {
-      if (i === attempts.length - 1) throw e;
-      console.warn(`${a.path} 실패(${e.message}) → 폴백 시도`);
+      if (i === tries.length - 1) throw e;
+      console.warn(`${t.p} 실패(${e.message}) → 폴백`);
     }
   }
 };
 
-const rows = await queryAll();
+const rows = (await queryAll()).filter(r => titleOf(r.properties));
+console.log(`${rows.length}행 수집 (${src.mode} ${src.id})`);
 
-const dumpRow = (row) => {
-  console.log(`--- "${title(row.properties)}" 행 속성 타입 ---`);
-  for (const [k, v] of Object.entries(row.properties)) {
+if (DIAGNOSE && rows[0]) {
+  console.log(`=== "${titleOf(rows[0].properties)}" 원본 속성 ===`);
+  for (const [k, v] of Object.entries(rows[0].properties)) {
     console.log(`${k} → ${v.type} :: ${JSON.stringify(v[v.type])}`);
   }
-  console.log("----------------------");
-};
-if (DEBUG && rows[0]) dumpRow(rows[0]);
+  for (const g of ["done", "inProgress"]) {
+    for (const c of candidates(rows[0].properties, GROUPS[g].keys)) {
+      const raw = await get(`pages/${rows[0].id}/properties/${encodeURIComponent(c.prop.id)}?page_size=5`)
+        .catch(e => ({ error: e.message }));
+      console.log(`[속성 엔드포인트] ${c.key} → ${JSON.stringify(raw).slice(0, 600)}`);
+    }
+  }
+  console.log("==============================");
+}
 
-// ── 3) 값 계산 (행 4개씩 병렬 = 최대 4 요청 동시)
-const members = (await mapLimit(rows.filter(r => title(r.properties)), 4, async (r) => {
-  const name = title(r.properties);
+// ── 관계를 직접 펼쳐 합산하는 최후 폴백 ─────────────────────────────────────
+const relationIds = async (pageId, props) => {
+  const rel = Object.values(props).find(p => p.type === "relation" &&
+    Object.entries(props).some(([k, v]) => v === p && normalize(k).includes(normalize(REL_PROP))));
+  const target = rel ?? Object.values(props).find(p => p.type === "relation");
+  if (!target) return [];
+  if (Array.isArray(target.relation) && target.relation.length < 25) return target.relation.map(r => r.id);
+  const ids = []; let cursor;
+  do {
+    const qs = cursor ? `?page_size=100&start_cursor=${cursor}` : "?page_size=100";
+    const d = await get(`pages/${pageId}/properties/${encodeURIComponent(target.id)}${qs}`);
+    for (const it of d.results ?? []) if (it.type === "relation") ids.push(it.relation.id);
+    cursor = d.has_more ? d.next_cursor : null;
+  } while (cursor);
+  return ids;
+};
+
+const relCache = new Map();
+const fetchRelated = async (id) => {
+  if (!relCache.has(id)) relCache.set(id, get(`pages/${id}`).catch(() => null));
+  return relCache.get(id);
+};
+
+const viaRelation = async (pageId, props, keys) => {
+  const ids = await relationIds(pageId, props);
+  if (!ids.length) return FAIL("관계 비어 있음");
+  const pages = (await mapLimit(ids, 3, fetchRelated)).filter(Boolean);
+  let sum = 0, matched = false;
+  for (const pg of pages) {
+    for (const c of candidates(pg.properties ?? {}, keys)) {
+      const v = readShallow(c.prop);
+      if (v.ok) { sum += v.value; matched = true; break; }
+    }
+  }
+  if (matched) return OK(sum);
+  return OK(pages.length); // 값 컬럼을 못 찾으면 개수 집계로 간주
+};
+
+// ── 그룹별 값 결정 ─────────────────────────────────────────────────────────
+const resolveGroup = async (row, groupKey) => {
+  const { keys, label } = GROUPS[groupKey];
+  const cands = candidates(row.properties, keys);
+  const reasons = [];
+  for (const c of cands) {
+    const v = await readDeep(row.id, c.prop);
+    if (v.ok) return { value: v.value, from: c.key };
+    reasons.push(`${c.key}(${c.prop.type}): ${v.reason}`);
+  }
+  if (groupKey === "done" || groupKey === "inProgress") {
+    const v = await viaRelation(row.id, row.properties, keys);
+    if (v.ok) return { value: v.value, from: `${REL_PROP} 관계 직접 합산`, fallback: true, reasons };
+  }
+  return { value: 0, from: null, reasons: reasons.length ? reasons : [`'${label}' 속성 없음`] };
+};
+
+const problems = [];
+const members = (await mapLimit(rows, 3, async (r) => {
+  const name = titleOf(r.properties);
   const [goal, done, inProgress, order] = await Promise.all([
-    numDeep(r.id, pick(r.properties, "목표")),
-    numDeep(r.id, pick(r.properties, "실적")),
-    numDeep(r.id, pick(r.properties, "진행중", "진행 중")),
-    numDeep(r.id, pick(r.properties, "순서"))
+    resolveGroup(r, "goal"), resolveGroup(r, "done"),
+    resolveGroup(r, "inProgress"), resolveGroup(r, "order")
   ]);
-  return { name, goal, done, inProgress, order };
+  for (const [k, v] of Object.entries({ 목표: goal, 실적: done, 진행중: inProgress })) {
+    if (!v.from) problems.push(`${name} / ${k} → ${v.reasons.join(" | ")}`);
+    else if (v.fallback) problems.push(`${name} / ${k} → 폴백 사용(${v.reasons.join(" | ")})`);
+  }
+  return {
+    name,
+    goal: goal.value, done: done.value, inProgress: inProgress.value,
+    order: order.value,
+    rate: goal.value ? Math.round((done.value / goal.value) * 100) : 0
+  };
 })).sort((a, b) => (a.order || 999) - (b.order || 999));
 
 const updated = new Intl.DateTimeFormat("ko-KR", {
@@ -239,13 +297,13 @@ const updated = new Intl.DateTimeFormat("ko-KR", {
   hour: "2-digit", minute: "2-digit", hour12: false
 }).format(new Date()).replace(/\. /g, ".").replace(/\.$/, "");
 
-await writeFile("data.json",
-  JSON.stringify({ updated, source: { mode: src.mode, id: src.id }, members }, null, 2) + "\n", "utf8");
-
-const zero = members.filter(m => m.done === 0 && m.inProgress === 0).length;
+await writeFile("data.json", JSON.stringify({ updated, members }, null, 2) + "\n", "utf8");
 console.log(`${members.length}명 동기화 완료 / 기준 ${updated}`);
-if (members.length > 0 && zero === members.length) {
-  console.warn("⚠ 전원 실적/진행중이 0입니다. 원본 속성 구조를 출력합니다:");
-  if (rows[0]) dumpRow(rows[0]);
-  console.warn("→ formula/rollup은 속성 전용 엔드포인트로 재조회하고 있으니, 여전히 0이면 Notion 원본 수식을 확인하세요.");
+members.forEach(m => console.log(`  ${m.order}. ${m.name}  목표 ${m.goal} / 실적 ${m.done} / 진행중 ${m.inProgress}`));
+
+if (problems.length) {
+  console.warn("⚠ 값 확보에 문제가 있던 항목:");
+  problems.slice(0, 20).forEach(p => console.warn("  - " + p));
+  console.warn("unsupported 가 보이면 통합이 '직원' 관계 대상 DB에도 초대돼 있는지 확인하세요.");
+  console.warn("DIAGNOSE=1 로 실행하면 원본 응답을 그대로 출력합니다.");
 }
