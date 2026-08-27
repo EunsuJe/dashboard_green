@@ -181,9 +181,17 @@ if (zero === members.length && members.length > 0) {
 
     const relationProps = Object.entries(schema.properties ?? {})
       .filter(([, v]) => v.type === "relation");
+    const rollupProps = Object.entries(schema.properties ?? {})
+      .filter(([, v]) => v.type === "rollup");
 
     if (relationProps.length === 0) {
       console.warn("→ 이 DB 스키마 응답에는 relation(관계) 속성이 없습니다. (위 [진단] 로그로 실제 원인 확인 필요 — 예: 다중 데이터소스 DB로 전환되어 2022-06-28 버전에서 properties가 예전과 다르게 내려올 수 있음)");
+    }
+
+    // 롤업이 정확히 어떤 relation/속성을 집계 대상으로 삼는지 확인
+    for (const [propName, propDef] of rollupProps) {
+      const rc = propDef.rollup ?? {};
+      console.warn(`→ [진단] rollup "${propName}" 설정: relation_property_name=${rc.relation_property_name}, rollup_property_name=${rc.rollup_property_name}, function=${rc.function}`);
     }
 
     for (const [propName, propDef] of relationProps) {
@@ -192,12 +200,36 @@ if (zero === members.length && members.length > 0) {
       console.warn(`→ relation "${propName}" → 대상 DB: ${relatedDbId} (첫 행 값 비어있음: ${emptyInRow0})`);
       if (!relatedDbId) continue;
       try {
-        await get(`databases/${relatedDbId}`);
-        console.warn(`  ✓ integration이 대상 DB(${relatedDbId})에 접근 가능합니다. (원인이 공유 문제가 아닐 수 있음)`);
+        const targetSchema = await get(`databases/${relatedDbId}`);
+        console.warn(`  ✓ integration이 대상 DB(${relatedDbId})에 접근 가능합니다.`);
+        console.warn(`  → 대상 DB 속성 목록: ${targetSchema.properties ? Object.keys(targetSchema.properties).join(", ") : "없음"}`);
+        // 이 relation을 참조하는 rollup이 실제로 집계하려는 속성이
+        // 대상 DB에 존재하는지, 어떤 타입인지 확인
+        for (const [rname, rdef] of rollupProps) {
+          if (rdef.rollup?.relation_property_name !== propName) continue;
+          const targetPropName = rdef.rollup.rollup_property_name;
+          const targetProp = targetSchema.properties?.[targetPropName];
+          console.warn(`  → rollup "${rname}"이 집계하는 대상 속성 "${targetPropName}" → 대상 DB에서 타입: ${targetProp ? targetProp.type : "★ 대상 DB에 해당 이름의 속성이 없음(integration에 이 속성이 안 보일 수 있음)"}`);
+        }
       } catch (e) {
         console.warn(`  ✗ integration이 대상 DB(${relatedDbId})에 접근할 수 없습니다: ${e.message}`);
         console.warn(`    → Notion에서 해당 DB(예: 영업활동DB)를 열어 우측 상단 '...' → 연결(Connections)에서`);
         console.warn(`      이 integration을 추가/공유해야 relation·rollup 값이 채워집니다.`);
+      }
+    }
+
+    // 첫 행 페이지를 속성 전용 엔드포인트로 직접 재조회해서
+    // "실(Set)"/"진(Set)" 롤업의 실제 원시 응답을 확인
+    if (rows[0]) {
+      for (const [rname] of rollupProps) {
+        const rp = rows[0].properties[rname];
+        if (!rp) continue;
+        try {
+          const fresh = await get(`pages/${rows[0].id}/properties/${encodeURIComponent(rp.id)}?page_size=100`);
+          console.warn(`→ [진단] 페이지 속성 재조회 "${rname}" 원시 응답: ${JSON.stringify(fresh).slice(0, 500)}`);
+        } catch (e) {
+          console.warn(`→ [진단] 페이지 속성 재조회 "${rname}" 실패: ${e.message}`);
+        }
       }
     }
   } catch (e) {
