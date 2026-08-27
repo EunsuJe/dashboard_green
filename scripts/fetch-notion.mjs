@@ -59,18 +59,27 @@ const num = (p) => {
       const r = p.rollup ?? {};
       if (r.type === "number") return r.number ?? 0;
       if (r.type === "array")  return r.array.reduce((s, it) => s + num(it), 0);
+      // "incomplete": DB 쿼리 시점에 롤업이 아직 계산되지 않아 값이 비어 오는
+      // Notion API의 알려진 동작. isTruncated()가 이를 감지해 numDeep()에서
+      // 속성 전용 엔드포인트로 재조회하므로 여기서는 0으로 처리(재조회 전 임시값).
       return 0;
     }
     default: return 0;
   }
 };
 
-// 롤업/관계가 25개에서 잘렸을 때 전용 엔드포인트로 정확히 다시 조회
+// 아래 두 경우엔 DB 쿼리 응답만으로 정확한 값을 알 수 없어
+// 속성 전용 엔드포인트(pages/{id}/properties/{prop_id})로 다시 조회해야 함:
+//  1) 롤업/관계가 25개 이상이라 배열이 페이지당 잘려서 온 경우
+//  2) 롤업이 "incomplete" 상태 - Notion이 DB 쿼리 시점엔 관계형 롤업 계산을
+//     끝내지 못해 값 없이 반환하는 경우가 있음(문서화되지 않은 동작).
+//     이걸 처리하지 않으면 rollup 기반 실적/진행중 값이 항상 0으로 나온다.
 const isTruncated = (p) =>
   !!p && (
     (p.type === "rollup"   && p.rollup?.type === "array" && p.rollup.array.length >= 25) ||
     (p.type === "relation" && Array.isArray(p.relation) && p.relation.length >= 25) ||
-    (p.type === "rollup"   && p.rollup?.type === "number" && p.rollup.number == null)
+    (p.type === "rollup"   && p.rollup?.type === "number" && p.rollup.number == null) ||
+    (p.type === "rollup"   && p.rollup?.type === "incomplete")
   );
 
 const numDeep = async (pageId, p) => {
