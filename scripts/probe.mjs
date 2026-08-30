@@ -34,8 +34,14 @@ for (const id of ids) {
   const t = Object.values(pg.properties).find(p => p.type === "title");
   const name = t?.title.map(x => x.plain_text).join("") || id.slice(0, 8);
   const vals = Object.entries(pg.properties)
-    .filter(([k]) => /실|진/.test(k))
-    .map(([k, v]) => `${k}=${JSON.stringify(v[v.type])}`)
+    .filter(([k]) => /실|진|당사/.test(k))
+    .map(([k, v]) => `${k}(${v.type})=${JSON.stringify(v[v.type])}`)
     .join("  ");
   console.log(`  [${name}] ${vals}`);
+}
+
+console.log(`\n=== 자식 페이지 전체 속성명 목록 (첫 1건) ===`);
+if (ids.length) {
+  const pg = await g(`pages/${ids[0]}`);
+  console.log(Object.keys(pg.properties).join(" | "));
 }
