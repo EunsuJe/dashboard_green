@@ -192,8 +192,9 @@ const members = (await mapLimit(rows, 2, async (r) => {
   const goal       = await resolveValue(r, "목표(Set)");
   const done       = await resolveValue(r, "실적(Set)");
   const inProgress = await resolveValue(r, "진행중(Set)");
+  const company    = await resolveValue(r, "당사(Set)");
   const order      = await resolveValue(r, "순서");
-  return { name, goal, done, inProgress, order, rate: goal ? Math.round((done / goal) * 100) : 0 };
+  return { name, goal, done, inProgress, company, order, rate: goal ? Math.round((done / goal) * 100) : 0 };
 })).sort((a, b) => (a.order || 999) - (b.order || 999));
 
 const updated = new Intl.DateTimeFormat("ko-KR", {
@@ -203,7 +204,7 @@ const updated = new Intl.DateTimeFormat("ko-KR", {
 
 console.log(`\n기준 ${updated}`);
 members.forEach(m =>
-  console.log(`  ${m.order}. ${m.name}  목표 ${m.goal} / 실적 ${m.done} / 진행중 ${m.inProgress} (${m.rate}%)`));
+  console.log(`  ${m.order}. ${m.name}  목표 ${m.goal} / 실적 ${m.done} / 진행중 ${m.inProgress} / 당사 ${m.company} (${m.rate}%)`));
 
 // 전원 0이면 기존 data.json 을 보존하고 실패 처리
 if (members.length && members.every(m => m.done === 0 && m.inProgress === 0) && members.some(m => m.goal > 0)) {

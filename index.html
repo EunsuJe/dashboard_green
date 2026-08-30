@@ -32,7 +32,7 @@
   .wrap{max-width:1040px;margin:0 auto}
 
   /* 상단 영역 — 여백 축소 (폰트 크기는 원본 유지) */
-  .top{display:grid;grid-template-columns:1.9fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px}
+  .top{margin-bottom:12px}
   .hero{
     background:var(--card-alt);border:1px solid var(--border);
     border-radius:14px;padding:16px 24px;
@@ -43,13 +43,17 @@
     display:inline-block;margin-top:10px;padding:5px 12px;border-radius:8px;
     background:var(--green-bg);color:var(--green-tx);font-size:13px;font-weight:700;
   }
+  .kpirow{display:grid;grid-template-columns:1fr 1fr 1fr 1.15fr 1fr;gap:12px;margin-top:12px}
   .kpi{
     background:var(--card);border:1px solid var(--border);border-radius:14px;
     padding:12px 18px;display:flex;flex-direction:column;justify-content:center;align-items:center;
   }
+  .kpi.total{background:var(--card-alt);border-color:var(--blue-light)}
   .kpi .label{font-size:13px;color:var(--muted);font-weight:500}
   .kpi .value{margin-top:6px;font-size:34px;font-weight:800;letter-spacing:-1px;line-height:1.15}
   .kpi .unit{font-size:14px;font-weight:600;color:var(--muted);margin-left:3px}
+  .kpi .sub{margin-top:6px;font-size:12px;color:var(--muted);font-weight:500}
+  .kpi .sub b{color:var(--blue);font-weight:700}
 
   /* 인원 카드 */
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -76,11 +80,10 @@
   .msg{grid-column:1/-1;color:var(--muted);font-size:14px;line-height:1.6}
 
   @media (max-width:900px){
-    .top{grid-template-columns:1fr 1fr 1fr}
-    .hero{grid-column:1 / -1}
+    .kpirow{grid-template-columns:1fr 1fr 1fr}
   }
   @media (max-width:620px){
-    .top{grid-template-columns:1fr}
+    .kpirow{grid-template-columns:1fr 1fr}
     .grid{grid-template-columns:1fr}
     .hero h1{font-size:24px}
   }
@@ -94,12 +97,19 @@
       <p>프로젝트 별 기여율 기준으로 업데이트했습니다.</p>
       <div class="badge" id="updated">불러오는 중...</div>
     </div>
-    <div class="kpi"><div class="label">총 목표</div>
-      <div class="value"><span id="totalGoal">0</span><span class="unit">Set</span></div></div>
-    <div class="kpi"><div class="label">총 실적</div>
-      <div class="value"><span id="totalDone">0</span><span class="unit">Set</span></div></div>
-    <div class="kpi"><div class="label">전체 달성률</div>
-      <div class="value"><span id="totalRate">0</span><span class="unit">%</span></div></div>
+    <div class="kpirow">
+      <div class="kpi"><div class="label">총 목표</div>
+        <div class="value"><span id="totalGoal">0</span><span class="unit">Set</span></div></div>
+      <div class="kpi"><div class="label">영업실적</div>
+        <div class="value"><span id="totalSales">0</span><span class="unit">Set</span></div></div>
+      <div class="kpi"><div class="label">당사실적</div>
+        <div class="value"><span id="totalCompany">0</span><span class="unit">Set</span></div></div>
+      <div class="kpi total"><div class="label">총 실적</div>
+        <div class="value"><span id="totalDone">0</span><span class="unit">Set</span></div>
+        <div class="sub">영업 <b id="totalSalesSub">0</b> + 당사 <b id="totalCompanySub">0</b></div></div>
+      <div class="kpi"><div class="label">전체 달성률</div>
+        <div class="value"><span id="totalRate">0</span><span class="unit">%</span></div></div>
+    </div>
   </div>
 
   <div class="grid" id="grid"></div>
@@ -116,10 +126,16 @@ async function render() {
 
   document.getElementById("updated").textContent = "업데이트 기준: " + updated;
 
-  const totalGoal = members.reduce((s, m) => s + (m.goal || 0), 0);
-  const totalDone = members.reduce((s, m) => s + (m.done || 0), 0);
+  const totalGoal    = members.reduce((s, m) => s + (m.goal || 0), 0);
+  const totalSales   = members.reduce((s, m) => s + (m.done || 0), 0);
+  const totalCompany = members.reduce((s, m) => s + (m.company || 0), 0);
+  const totalDone    = totalSales + totalCompany;
   document.getElementById("totalGoal").textContent = fmt(totalGoal);
+  document.getElementById("totalSales").textContent = fmt(totalSales);
+  document.getElementById("totalCompany").textContent = fmt(totalCompany);
   document.getElementById("totalDone").textContent = fmt(totalDone);
+  document.getElementById("totalSalesSub").textContent = fmt(totalSales);
+  document.getElementById("totalCompanySub").textContent = fmt(totalCompany);
   document.getElementById("totalRate").textContent = pct(totalDone, totalGoal).toFixed(2);
 
   document.getElementById("grid").innerHTML = members.map(m => {
@@ -136,8 +152,9 @@ async function render() {
           <span class="done" data-w="${Math.min(p, 100)}"></span>
         </div>
         <div class="legend">
-          <span><i class="done"></i>실적 ${fmt(m.done)}</span>
+          <span><i class="done"></i>영업 ${fmt(m.done)}</span>
           <span><i class="progress"></i>진행중 ${fmt(inProgress)}</span>
+          ${m.company ? `<span>당사 ${fmt(m.company)}</span>` : ""}
         </div>
         <div class="foot"><span>달성률</span><span class="pct">${p.toFixed(2)}%</span></div>
       </div>`;
