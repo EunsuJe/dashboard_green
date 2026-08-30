@@ -7,6 +7,9 @@ const MAX_DEPTH = 6;
 
 if (!TOKEN) { console.error("NOTION_TOKEN 이 없습니다."); process.exit(1); }
 
+// 특정 롤업 속성에 대해서만 상세 디버그 로그를 남긴다 (원인 파악용, 필요 없으면 빈 Set으로)
+const DEBUG_ROLLUP = new Set(["당사(Set)"]);
+
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const api = async (path, opt = {}, attempt = 0) => {
@@ -167,6 +170,16 @@ const resolveValue = async (page, propName, depth = 0) => {
           });
           const out = aggregate(fn, vals);
           if (depth === 0) console.log(`    ↳ ${key}: ${ids.length}건 → [${vals.join(", ")}] = ${out}`);
+          if (depth === 0 && [...DEBUG_ROLLUP].some(d => normalize(d) === normalize(key))) {
+            console.log(`      [디버그] relName="${relName}" tgtName="${tgtName}" fn="${fn}"`);
+            for (const id of ids) {
+              const child = await pageOf(id, targetDs);
+              const childKey = child ? findKey(child.properties ?? {}, tgtName) : null;
+              const rawProp = childKey ? child.properties[childKey] : null;
+              const childName = child ? titleOf(child.properties ?? {}) : "(못찾음)";
+              console.log(`      · ${childName} (${id.slice(0,8)}) → childKey="${childKey}" type=${rawProp?.type} raw=${JSON.stringify(rawProp?.[rawProp?.type])}`);
+            }
+          }
           return out;
         }
       }
