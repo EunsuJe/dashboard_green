@@ -6,6 +6,7 @@
       "goal": 60,
       "done": 14,
       "inProgress": 2,
+      "company": 9,
       "order": 1,
       "rate": 23
     },
@@ -14,6 +15,7 @@
       "goal": 60,
       "done": 14,
       "inProgress": 30,
+      "company": 9,
       "order": 2,
       "rate": 23
     },
@@ -22,6 +24,7 @@
       "goal": 70,
       "done": 25,
       "inProgress": 35,
+      "company": 11,
       "order": 3,
       "rate": 36
     },
@@ -30,6 +33,7 @@
       "goal": 70,
       "done": 80,
       "inProgress": 34,
+      "company": 0,
       "order": 4,
       "rate": 114
     },
@@ -38,6 +42,7 @@
       "goal": 50,
       "done": 26,
       "inProgress": 17,
+      "company": 9,
       "order": 5,
       "rate": 52
     },
@@ -46,6 +51,7 @@
       "goal": 50,
       "done": 53,
       "inProgress": 57,
+      "company": 9,
       "order": 6,
       "rate": 106
     }
