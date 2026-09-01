@@ -1,5 +1,5 @@
 {
-  "updated": "2026.09.01.13:15",
+  "updated": "2026.09.01.13:53",
   "members": [
     {
       "name": "조영재",
@@ -22,11 +22,11 @@
     {
       "name": "이교성",
       "goal": 70,
-      "done": 14,
-      "inProgress": 35,
+      "done": 11,
+      "inProgress": 38,
       "company": 0,
       "order": 3,
-      "rate": 20
+      "rate": 16
     },
     {
       "name": "박용우",
@@ -40,20 +40,20 @@
     {
       "name": "이우람",
       "goal": 50,
-      "done": 17,
-      "inProgress": 17,
+      "done": 12,
+      "inProgress": 22,
       "company": 0,
       "order": 5,
-      "rate": 34
+      "rate": 24
     },
     {
       "name": "이동현",
       "goal": 50,
-      "done": 14,
-      "inProgress": 87,
+      "done": 7,
+      "inProgress": 94,
       "company": 0,
       "order": 6,
-      "rate": 28
+      "rate": 14
     }
   ]
 }
