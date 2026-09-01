@@ -1,5 +1,5 @@
 {
-  "updated": "2026.09.01.10:15",
+  "updated": "2026.09.01.11:15",
   "members": [
     {
       "name": "조영재",
@@ -49,11 +49,11 @@
     {
       "name": "이동현",
       "goal": 50,
-      "done": 44,
-      "inProgress": 57,
+      "done": 14,
+      "inProgress": 87,
       "company": 0,
       "order": 6,
-      "rate": 88
+      "rate": 28
     }
   ]
 }
