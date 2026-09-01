@@ -31,19 +31,21 @@
   }
   .wrap{max-width:1040px;margin:0 auto}
 
-  /* 상단 영역 — 여백 축소 (폰트 크기는 원본 유지) */
+  /* 상단 영역 — 1줄 압축, 높이 축소 */
   .top{margin-bottom:12px}
   .hero{
     background:var(--card-alt);border:1px solid var(--border);
-    border-radius:14px;padding:16px 24px;
+    border-radius:14px;padding:12px 20px;
+    display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;
   }
-  .hero h1{font-size:29px;font-weight:800;letter-spacing:-.6px;line-height:1.2}
-  .hero p{margin-top:6px;font-size:14px;color:var(--muted);line-height:1.4}
+  .hero-left{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;min-width:0}
+  .hero h1{font-size:22px;font-weight:800;letter-spacing:-.6px;line-height:1.2;white-space:nowrap}
+  .hero p{font-size:13px;color:var(--muted);line-height:1.4;white-space:nowrap}
   .badge{
-    display:inline-block;margin-top:10px;padding:5px 12px;border-radius:8px;
-    background:var(--green-bg);color:var(--green-tx);font-size:13px;font-weight:700;
+    flex-shrink:0;display:inline-block;padding:5px 12px;border-radius:8px;
+    background:var(--green-bg);color:var(--green-tx);font-size:13px;font-weight:700;white-space:nowrap;
   }
-  .kpirow{display:grid;grid-template-columns:1fr 1fr 1fr 1.15fr 1fr;gap:12px;margin-top:12px}
+  .kpirow{display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1.5fr;gap:12px;margin-top:12px}
   .kpi{
     background:var(--card);border:1px solid var(--border);border-radius:14px;
     padding:12px 18px;display:flex;flex-direction:column;justify-content:center;align-items:center;
@@ -54,6 +56,15 @@
   .kpi .unit{font-size:14px;font-weight:600;color:var(--muted);margin-left:3px}
   .kpi .sub{margin-top:6px;font-size:12px;color:var(--muted);font-weight:500}
   .kpi .sub b{color:var(--blue);font-weight:700}
+
+  /* 총 실적 + 전체 달성률 결합 카드 */
+  .kpi.combo{padding:10px 14px}
+  .combo-split{display:flex;align-items:center;width:100%;justify-content:center}
+  .combo-stat{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-width:0}
+  .combo-divider{width:1px;height:38px;background:var(--border);margin:0 12px;flex-shrink:0}
+  .combo-stat .value{font-size:26px}
+  .combo-stat .label{font-size:12px}
+  .combo-stat .sub{white-space:nowrap}
 
   /* 인원 카드 */
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
@@ -81,11 +92,14 @@
 
   @media (max-width:900px){
     .kpirow{grid-template-columns:1fr 1fr 1fr}
+    .kpi.combo{grid-column:1/-1}
   }
   @media (max-width:620px){
     .kpirow{grid-template-columns:1fr 1fr}
+    .kpi.combo{grid-column:1/-1}
     .grid{grid-template-columns:1fr}
-    .hero h1{font-size:24px}
+    .hero{flex-direction:column;align-items:flex-start}
+    .hero h1{font-size:20px}
   }
 </style>
 </head>
@@ -93,22 +107,36 @@
 <div class="wrap">
   <div class="top">
     <div class="hero">
-      <h1>인원별 목표 대비 실적</h1>
-      <p>프로젝트 별 기여율 기준으로 업데이트했습니다.</p>
+      <div class="hero-left">
+        <h1>인원별 목표 대비 실적</h1>
+        <p>프로젝트 별 기여율 기준으로 업데이트했습니다.</p>
+      </div>
       <div class="badge" id="updated">불러오는 중...</div>
     </div>
     <div class="kpirow">
       <div class="kpi"><div class="label">총 목표</div>
         <div class="value"><span id="totalGoal">0</span><span class="unit">Set</span></div></div>
-      <div class="kpi"><div class="label">영업실적</div>
+      <div class="kpi"><div class="label">수주진행</div>
+        <div class="value"><span id="totalProgress">0</span><span class="unit">Set</span></div></div>
+      <div class="kpi"><div class="label">수주완료</div>
         <div class="value"><span id="totalSales">0</span><span class="unit">Set</span></div></div>
-      <div class="kpi"><div class="label">당사실적</div>
-        <div class="value"><span id="totalCompany">0</span><span class="unit">Set</span></div></div>
-      <div class="kpi total"><div class="label">총 실적</div>
-        <div class="value"><span id="totalDone">0</span><span class="unit">Set</span></div>
-        <div class="sub">영업 <b id="totalSalesSub">0</b> + 당사 <b id="totalCompanySub">0</b></div></div>
-      <div class="kpi"><div class="label">전체 달성률</div>
-        <div class="value"><span id="totalRate">0</span><span class="unit">%</span></div></div>
+      <div class="kpi"><div class="label">영업합계</div>
+        <div class="value"><span id="totalSalesSum">0</span><span class="unit">Set</span></div>
+        <div class="sub">진행 <b id="totalProgressSub">0</b> + 완료 <b id="totalSalesSub">0</b></div></div>
+      <div class="kpi total combo">
+        <div class="combo-split">
+          <div class="combo-stat">
+            <div class="label">총 실적</div>
+            <div class="value"><span id="totalDone">0</span><span class="unit">Set</span></div>
+            <div class="sub">완료 <b id="totalSalesSub2">0</b> + 당사 <b id="totalCompanySub">0</b></div>
+          </div>
+          <div class="combo-divider"></div>
+          <div class="combo-stat">
+            <div class="label">전체 달성률</div>
+            <div class="value"><span id="totalRate">0</span><span class="unit">%</span></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -126,15 +154,20 @@ async function render() {
 
   document.getElementById("updated").textContent = "업데이트 기준: " + updated;
 
-  const totalGoal    = members.reduce((s, m) => s + (m.goal || 0), 0);
-  const totalSales   = members.reduce((s, m) => s + (m.done || 0), 0);
-  const totalCompany = members.reduce((s, m) => s + (m.company || 0), 0);
-  const totalDone    = totalSales + totalCompany;
+  const totalGoal     = members.reduce((s, m) => s + (m.goal || 0), 0);
+  const totalProgress = members.reduce((s, m) => s + (m.inProgress || 0), 0);
+  const totalSales    = members.reduce((s, m) => s + (m.done || 0), 0);
+  const totalCompany  = members.reduce((s, m) => s + (m.company || 0), 0);
+  const totalSalesSum = totalProgress + totalSales;
+  const totalDone     = totalSales + totalCompany;
   document.getElementById("totalGoal").textContent = fmt(totalGoal);
+  document.getElementById("totalProgress").textContent = fmt(totalProgress);
   document.getElementById("totalSales").textContent = fmt(totalSales);
-  document.getElementById("totalCompany").textContent = fmt(totalCompany);
-  document.getElementById("totalDone").textContent = fmt(totalDone);
+  document.getElementById("totalSalesSum").textContent = fmt(totalSalesSum);
+  document.getElementById("totalProgressSub").textContent = fmt(totalProgress);
   document.getElementById("totalSalesSub").textContent = fmt(totalSales);
+  document.getElementById("totalDone").textContent = fmt(totalDone);
+  document.getElementById("totalSalesSub2").textContent = fmt(totalSales);
   document.getElementById("totalCompanySub").textContent = fmt(totalCompany);
   document.getElementById("totalRate").textContent = pct(totalDone, totalGoal).toFixed(2);
 
