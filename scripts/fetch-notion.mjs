@@ -106,6 +106,26 @@ const relationIds = async (page, prop) => {
   return ids;
 };
 
+// formula 속성은 관계형 롤업을 참조해 계산되는 경우, DB 쿼리(query/재귀 프리페치)
+// 응답 시점에 그 롤업이 아직 최신 값으로 재계산되지 않아 formula.number: 0 이
+// 그대로 실려 오는 경우가 있다(최상위뿐 아니라 중첩된 자식 페이지에서도 발생).
+// 속성 전용 엔드포인트(pages/{id}/properties/{prop_id})는 호출 시점에 재계산된
+// 최신 값을 반환하므로, formula 값이 0으로 보이면 이 엔드포인트로 재조회해 확인한다.
+const freshFormulaCache = new Map(); // `${pageId}:${propId}` → formula 값 객체
+const freshFormula = async (pageId, prop) => {
+  const cacheKey = `${pageId}:${prop.id}`;
+  if (freshFormulaCache.has(cacheKey)) return freshFormulaCache.get(cacheKey);
+  try {
+    const d = await get(`pages/${pageId}/properties/${encodeURIComponent(prop.id)}`);
+    const f = d?.type === "formula" ? (d.formula ?? {}) : (d ?? {});
+    freshFormulaCache.set(cacheKey, f);
+    return f;
+  } catch {
+    freshFormulaCache.set(cacheKey, null);
+    return null;
+  }
+};
+
 const aggregate = (fn, values) => {
   const nums = values.filter(v => Number.isFinite(v));
   switch (fn) {
@@ -140,12 +160,19 @@ const resolveValue = async (page, propName, depth = 0) => {
     case "relation": return (await relationIds(page, p)).length;
 
     case "formula": {
-      // 자식 레벨 수식은 Notion이 정상 계산해 주므로 그대로 사용한다.
-      const f = p.formula ?? {};
-      if (f.type === "number")  return f.number ?? 0;
-      if (f.type === "boolean") return f.boolean ? 1 : 0;
-      if (f.type === "string")  return parseFloat(String(f.string).replace(/[^\d.-]/g, "")) || 0;
-      return 0;
+      const toNum = (f) => {
+        if (!f) return 0;
+        if (f.type === "number")  return f.number ?? 0;
+        if (f.type === "boolean") return f.boolean ? 1 : 0;
+        if (f.type === "string")  return parseFloat(String(f.string).replace(/[^\d.-]/g, "")) || 0;
+        return 0;
+      };
+      const first = toNum(p.formula);
+      // 0이면 아직 재계산되지 않은 캐시된 값일 수 있으므로 속성 전용 엔드포인트로
+      // 재조회해 최신 값을 다시 확인한다(0이 아니면 재조회 없이 그대로 신뢰).
+      if (first !== 0) return first;
+      const fresh = await freshFormula(page.id, p);
+      return toNum(fresh);
     }
 
     case "rollup": {
