@@ -1,11 +1,11 @@
 {
-  "updated": "2026.10.19.10:15",
+  "updated": "2026.10.19.11:15",
   "members": [
     {
       "name": "조영재",
       "goal": 60,
       "done": 15,
-      "inProgress": 69,
+      "inProgress": 59,
       "company": 0,
       "order": 1,
       "rate": 25
@@ -23,7 +23,7 @@
       "name": "이교성",
       "goal": 70,
       "done": 30,
-      "inProgress": 106,
+      "inProgress": 82,
       "company": 0,
       "order": 3,
       "rate": 43
@@ -41,7 +41,7 @@
       "name": "이우람",
       "goal": 50,
       "done": 54,
-      "inProgress": 36,
+      "inProgress": 22,
       "company": 0,
       "order": 5,
       "rate": 108
